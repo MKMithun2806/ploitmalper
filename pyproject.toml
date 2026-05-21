@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ploit-malper = "ploit_malper.cli.main:entrypoint"
+ploit-malper = "ploit_malper.cli.main:main"
 
 [tool.maturin]
 module-name = "ploit_malper._core"

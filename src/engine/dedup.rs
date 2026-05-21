@@ -11,6 +11,7 @@ pub struct ScanRecord {
     pub severity: String,
     pub port: Option<u16>,
     pub cve: Option<String>,
+    pub service: Option<String>,
     pub raw: serde_json::Value,
 }
 
