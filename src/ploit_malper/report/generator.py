@@ -13,7 +13,23 @@ from rich.markdown import Markdown
 console = Console()
 
 
+def _cvss_label(score: Optional[float]) -> str:
+    if score is None:
+        return "—"
+    if score >= 9.0:
+        return f"[bold red]{score:.1f}[/bold red]"
+    if score >= 7.0:
+        return f"[red]{score:.1f}[/red]"
+    if score >= 4.0:
+        return f"[yellow]{score:.1f}[/yellow]"
+    if score > 0:
+        return f"[green]{score:.1f}[/green]"
+    return f"[dim]{score:.1f}[/dim]"
+
+
 def render_findings_table(records: list[dict]) -> Table:
+    has_nvd = any(r.get("nvd_cvss_v3") is not None for r in records)
+
     table = Table(
         title="[bold cyan]Deduplicated Vulnerability Findings[/bold cyan]",
         border_style="cyan",
@@ -21,12 +37,14 @@ def render_findings_table(records: list[dict]) -> Table:
         header_style="bold magenta",
     )
     table.add_column("#", style="dim", width=4)
-    table.add_column("Target", style="green", width=20)
-    table.add_column("Tool", style="yellow", width=12)
-    table.add_column("Title", style="white", width=40)
+    table.add_column("Target", style="green", width=18)
+    table.add_column("Tool", style="yellow", width=10)
+    table.add_column("Title", style="white", width=35)
     table.add_column("Severity", style="red", width=10)
     table.add_column("Port", style="dim", width=6)
-    table.add_column("CVE", style="cyan", width=18)
+    table.add_column("CVE", style="cyan", width=16)
+    if has_nvd:
+        table.add_column("CVSS v3", style="white", width=8)
 
     severity_colors = {
         "critical": "bold red",
@@ -40,15 +58,18 @@ def render_findings_table(records: list[dict]) -> Table:
     for idx, record in enumerate(records, 1):
         sev = record.get("severity", "unknown").lower()
         sev_style = severity_colors.get(sev, "dim")
-        table.add_row(
+        row = [
             str(idx),
             record.get("target", "N/A"),
             record.get("tool", "N/A"),
-            record.get("title", "N/A")[:38],
+            record.get("title", "N/A")[:33],
             f"[{sev_style}]{sev.upper()}[/{sev_style}]",
             str(record.get("port", "")),
             record.get("cve", "") or "—",
-        )
+        ]
+        if has_nvd:
+            row.append(_cvss_label(record.get("nvd_cvss_v3")))
+        table.add_row(*row)
 
     return table
 
@@ -82,6 +103,7 @@ def generate_markdown_report(
     output_path: str = "report.md",
 ) -> str:
     lines: list[str] = []
+    has_nvd = any(r.get("nvd_cvss_v3") is not None for r in records)
 
     lines.append("# PloitMalper — Vulnerability Analysis Report")
     lines.append("")
@@ -94,6 +116,8 @@ def generate_markdown_report(
     lines.append(f"- **Total records processed:** {dedup_stats.get('total', 0)}")
     lines.append(f"- **Unique findings:** {dedup_stats.get('unique', 0)}")
     lines.append(f"- **Duplicates removed:** {dedup_stats.get('removed', 0)}")
+    if has_nvd:
+        lines.append(f"- **NVD enrichment:** Enabled")
     lines.append("")
 
     severity_counts: dict[str, int] = {}
@@ -111,21 +135,69 @@ def generate_markdown_report(
 
     lines.append("## Findings")
     lines.append("")
-    lines.append("| # | Target | Tool | Title | Severity | Port | CVE |")
-    lines.append("|---|--------|------|-------|----------|------|-----|")
 
-    for idx, record in enumerate(records, 1):
-        lines.append(
-            f"| {idx} "
-            f"| {record.get('target', 'N/A')} "
-            f"| {record.get('tool', 'N/A')} "
-            f"| {record.get('title', 'N/A')} "
-            f"| {record.get('severity', 'unknown').upper()} "
-            f"| {record.get('port', '—')} "
-            f"| {record.get('cve', '—') or '—'} |"
-        )
+    if has_nvd:
+        lines.append("| # | Target | Tool | Title | Severity | Port | CVE | CVSS v3 | NVD Severity |")
+        lines.append("|---|--------|------|-------|----------|------|-----|---------|--------------|")
+        for idx, record in enumerate(records, 1):
+            cvss = record.get("nvd_cvss_v3")
+            cvss_str = f"{cvss:.1f}" if cvss is not None else "—"
+            nvd_sev = (record.get("nvd_cvss_v3_severity") or "—").upper()
+            lines.append(
+                f"| {idx} "
+                f"| {record.get('target', 'N/A')} "
+                f"| {record.get('tool', 'N/A')} "
+                f"| {record.get('title', 'N/A')} "
+                f"| {record.get('severity', 'unknown').upper()} "
+                f"| {record.get('port', '—')} "
+                f"| {record.get('cve', '—') or '—'} "
+                f"| {cvss_str} "
+                f"| {nvd_sev} |"
+            )
+    else:
+        lines.append("| # | Target | Tool | Title | Severity | Port | CVE |")
+        lines.append("|---|--------|------|-------|----------|------|-----|")
+        for idx, record in enumerate(records, 1):
+            lines.append(
+                f"| {idx} "
+                f"| {record.get('target', 'N/A')} "
+                f"| {record.get('tool', 'N/A')} "
+                f"| {record.get('title', 'N/A')} "
+                f"| {record.get('severity', 'unknown').upper()} "
+                f"| {record.get('port', '—')} "
+                f"| {record.get('cve', '—') or '—'} |"
+            )
 
     lines.append("")
+
+    if has_nvd:
+        lines.append("## CVE Details (NVD)")
+        lines.append("")
+        for record in records:
+            cve = record.get("cve")
+            if not cve:
+                continue
+            desc = record.get("nvd_description", "")
+            cvss = record.get("nvd_cvss_v3")
+            nvd_sev = record.get("nvd_cvss_v3_severity", "")
+            published = record.get("nvd_published", "")
+            refs = record.get("nvd_references", [])
+
+            lines.append(f"### {cve}")
+            lines.append("")
+            if cvss is not None:
+                lines.append(f"- **CVSS v3 Score:** {cvss:.1f}")
+            if nvd_sev:
+                lines.append(f"- **NVD Severity:** {nvd_sev.upper()}")
+            if published:
+                lines.append(f"- **Published:** {published}")
+            if desc:
+                lines.append(f"- **Description:** {desc}")
+            if refs:
+                lines.append(f"- **References:**")
+                for ref in refs:
+                    lines.append(f"  - {ref}")
+            lines.append("")
 
     if suggestions:
         lines.append("## Metasploit Module Suggestions")

@@ -13,6 +13,7 @@ from rich.table import Table
 
 from ploit_malper.state.config import ConfigManager
 from ploit_malper.state.msfrpc import MSFRPCClient
+from ploit_malper.state.nvd import NVDClient
 from ploit_malper.cli.recipe import build_recipe, get_available_platforms, get_available_arches
 from ploit_malper.share.server import start_file_server, stop_file_server
 from ploit_malper.report.generator import (
@@ -37,8 +38,10 @@ except ImportError:
     console.print("[!] Rust extension module not available. Some features will be limited.")
 
 
-def setup_msf_credentials(config_mgr: ConfigManager) -> None:
-    console.print(Panel("[bold yellow]MSF-RPC Configuration Setup[/bold yellow]", border_style="yellow"))
+def setup_credentials(config_mgr: ConfigManager) -> None:
+    console.print(Panel("[bold yellow]PloitMalper Configuration Setup[/bold yellow]", border_style="yellow"))
+
+    console.print("\n[bold cyan]--- MSF-RPC Configuration ---[/bold cyan]")
     console.print("[?] Enter your Metasploit RPC server details.\n")
 
     host = Prompt.ask("  MSF-RPC Host", default=config_mgr.config.msfrpc.host)
@@ -54,6 +57,14 @@ def setup_msf_credentials(config_mgr: ConfigManager) -> None:
     config_mgr.config.msfrpc.password = password
     config_mgr.config.msfrpc.ssl = ssl
     config_mgr.config.msfrpc.workspace = workspace
+
+    console.print("\n[bold cyan]--- NVD API Configuration ---[/bold cyan]")
+    console.print("[?] Enter your NVD API key for CVE enrichment (optional but recommended).")
+    console.print("[?] Get one at: https://nvd.nist.gov/developers/request-an-api-key\n")
+
+    nvd_key = Prompt.ask("  NVD API Key", default=config_mgr.config.nvd.api_key, password=True)
+    config_mgr.config.nvd.api_key = nvd_key
+
     config_mgr.save()
 
     console.print("\n[+] Configuration saved to ~/.config/ploit_malper/config.json")
@@ -94,6 +105,13 @@ def cmd_process(args: argparse.Namespace, config_mgr: ConfigManager) -> None:
         dedup_stats = {"total": len(parsed), "unique": len(parsed), "removed": 0}
 
     console.print(f"[+] Deduplication complete: {dedup_stats['unique']} unique, {dedup_stats['removed']} removed\n")
+
+    nvd_client: Optional[NVDClient] = None
+    if config_mgr.is_nvd_configured():
+        nvd_cfg = config_mgr.get_nvd_config()
+        nvd_client = NVDClient(api_key=nvd_cfg.api_key)
+        records = nvd_client.enrich_records(records)
+        console.print("")
 
     table = render_findings_table(records)
     console.print(table)
@@ -213,7 +231,7 @@ def cmd_share(args: argparse.Namespace) -> None:
 def cmd_reset_config(args: argparse.Namespace, config_mgr: ConfigManager) -> None:
     console.print("[?] Resetting all stored configuration...")
     config_mgr.reset()
-    console.print("[+] Configuration reset. Run ploit-malper to set up MSF-RPC credentials.")
+    console.print("[+] Configuration reset. Run ploit-malper to set up credentials.")
 
 
 def main() -> None:
@@ -230,9 +248,9 @@ def main() -> None:
     share_parser.add_argument("--directory", "-d", help="Directory to serve", default=None)
     share_parser.add_argument("--port", "-p", type=int, help="Port to listen on", default=None)
 
-    subparsers.add_parser("reset-config", help="Reset stored MSF-RPC credentials")
+    subparsers.add_parser("reset-config", help="Reset stored credentials and NVD cache")
 
-    subparsers.add_parser("setup", help="Configure MSF-RPC credentials interactively")
+    subparsers.add_parser("setup", help="Configure MSF-RPC and NVD API credentials interactively")
 
     args = parser.parse_args()
 
@@ -244,7 +262,7 @@ def main() -> None:
         return
 
     if args.command == "setup":
-        setup_msf_credentials(config_mgr)
+        setup_credentials(config_mgr)
         return
 
     if args.command == "share":
@@ -254,8 +272,8 @@ def main() -> None:
     if args.command == "process":
         if not config_loaded or not config_mgr.is_configured():
             console.print("[?] No MSF-RPC configuration found.")
-            if Confirm.ask("  Configure MSF-RPC now?", default=True):
-                setup_msf_credentials(config_mgr)
+            if Confirm.ask("  Configure MSF-RPC and NVD API now?", default=True):
+                setup_credentials(config_mgr)
             else:
                 console.print("[?] Continuing without MSF-RPC integration.\n")
         cmd_process(args, config_mgr)
@@ -268,7 +286,7 @@ def main() -> None:
             "[bold]Commands:[/bold]\n"
             "  [green]process <file>[/green]   Process and deduplicate scan results\n"
             "  [green]share[/green]            Start temporary file server\n"
-            "  [green]setup[/green]            Configure MSF-RPC credentials\n"
+            "  [green]setup[/green]            Configure MSF-RPC and NVD API credentials\n"
             "  [green]reset-config[/green]     Reset stored configuration",
             border_style="cyan",
         )

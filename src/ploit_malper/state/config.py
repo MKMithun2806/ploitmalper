@@ -8,6 +8,7 @@ from typing import Optional
 
 CONFIG_DIR = Path.home() / ".config" / "ploit_malper"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+NVD_CACHE_FILE = CONFIG_DIR / "nvd_cache.json"
 
 
 @dataclass
@@ -21,8 +22,14 @@ class MSFRPCConfig:
 
 
 @dataclass
+class NVDConfig:
+    api_key: str = ""
+
+
+@dataclass
 class AppConfig:
     msfrpc: MSFRPCConfig = field(default_factory=MSFRPCConfig)
+    nvd: NVDConfig = field(default_factory=NVDConfig)
     report_dir: str = str(Path.home() / "ploit_malper_reports")
     last_scan_file: Optional[str] = None
 
@@ -38,8 +45,10 @@ class ConfigManager:
                 raw = CONFIG_FILE.read_text(encoding="utf-8")
                 data = json.loads(raw)
                 msf_data = data.get("msfrpc", {})
+                nvd_data = data.get("nvd", {})
                 self.config = AppConfig(
                     msfrpc=MSFRPCConfig(**msf_data),
+                    nvd=NVDConfig(**nvd_data),
                     report_dir=data.get("report_dir", self.config.report_dir),
                     last_scan_file=data.get("last_scan_file"),
                 )
@@ -57,6 +66,8 @@ class ConfigManager:
     def reset(self) -> None:
         if CONFIG_FILE.exists():
             CONFIG_FILE.unlink()
+        if NVD_CACHE_FILE.exists():
+            NVD_CACHE_FILE.unlink()
         self.config = AppConfig()
         self._loaded = False
 
@@ -65,3 +76,9 @@ class ConfigManager:
 
     def get_msfrpc_config(self) -> MSFRPCConfig:
         return self.config.msfrpc
+
+    def get_nvd_config(self) -> NVDConfig:
+        return self.config.nvd
+
+    def is_nvd_configured(self) -> bool:
+        return bool(self.config.nvd.api_key)
