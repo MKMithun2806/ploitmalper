@@ -1,6 +1,6 @@
 [project]
 name = "ploit-malper"
-version = "0.1.0"
+version = "1.0.0"
 description = "Vulnerability Post-Processing and Analysis Toolkit — deduplication, recon, and reporting for VulnMalper scan results"
 readme = "README.md"
 requires-python = ">=3.11"

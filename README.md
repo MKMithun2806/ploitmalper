@@ -29,6 +29,12 @@ uv sync
 maturin develop
 ```
 
+## MSF-RPC Setup
+
+```bash
+load msgrpc ServerHost=127.0.0.1 ServerPort=55553 User=ploituder Pass=Mithun2806 SSL=false
+```
+
 ## Usage
 
 ```bash
