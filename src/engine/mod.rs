@@ -1,3 +1,4 @@
 pub mod dedup;
-pub mod parser;
 pub mod matcher;
+pub mod msfrpc;
+pub mod parser;

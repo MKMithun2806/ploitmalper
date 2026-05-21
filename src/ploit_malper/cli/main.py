@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -12,7 +11,6 @@ from rich.prompt import Prompt, Confirm, IntPrompt
 from rich.table import Table
 
 from ploit_malper.state.config import ConfigManager
-from ploit_malper.state.msfrpc import MSFRPCClient
 from ploit_malper.state.nvd import NVDClient
 from ploit_malper.cli.recipe import build_recipe, get_available_platforms, get_available_arches
 from ploit_malper.share.server import start_file_server, stop_file_server
@@ -30,7 +28,14 @@ try:
         normalize_title_py,
         parse_vulnmalper_json,
         suggest_modules,
+        suggest_from_title,
         get_all_known_banners,
+        msf_login,
+        msf_logout,
+        msf_is_authenticated,
+        msf_get_workspaces,
+        msf_get_hosts,
+        msf_check_host_exists,
     )
     HAS_RUST = True
 except ImportError:
@@ -118,13 +123,20 @@ def cmd_process(args: argparse.Namespace, config_mgr: ConfigManager) -> None:
 
     all_suggestions: list[dict] = []
     if HAS_RUST:
-        console.print("\n[+] Analyzing service banners for module suggestions...")
+        console.print("\n[+] Analyzing service banners and titles for module suggestions...")
         for record in records:
             service = record.get("service", "")
+            title = record.get("title", "")
             if service:
                 sug_json = suggest_modules(service)
                 sugs: list[dict] = json.loads(sug_json)
                 all_suggestions.extend(sugs)
+            if title:
+                sug_json = suggest_from_title(title, "")
+                sugs: list[dict] = json.loads(sug_json)
+                for sug in sugs:
+                    if sug not in all_suggestions:
+                        all_suggestions.append(sug)
 
         if all_suggestions:
             mod_table = render_module_table(all_suggestions)
@@ -132,35 +144,46 @@ def cmd_process(args: argparse.Namespace, config_mgr: ConfigManager) -> None:
         else:
             console.print("[?] No module suggestions for detected services.")
 
-    msf_client: Optional[MSFRPCClient] = None
-    if config_mgr.is_configured():
+    msf_connected = False
+    if config_mgr.is_configured() and HAS_RUST:
         console.print("\n[+] Connecting to MSF-RPC for workspace verification...")
         msf_cfg = config_mgr.get_msfrpc_config()
-        msf_client = MSFRPCClient(
-            host=msf_cfg.host,
-            port=msf_cfg.port,
-            username=msf_cfg.username,
-            password=msf_cfg.password,
-            ssl=msf_cfg.ssl,
+        login_json = msf_login(
+            msf_cfg.host,
+            msf_cfg.port,
+            msf_cfg.username,
+            msf_cfg.password,
+            msf_cfg.ssl,
         )
-        if msf_client.login():
+        login_result: dict = json.loads(login_json)
+
+        if login_result.get("success"):
+            msf_connected = True
             console.print(f"[+] Authenticated to MSF-RPC at {msf_cfg.host}:{msf_cfg.port}")
-            workspaces = msf_client.get_workspaces()
+
+            ws_json = msf_get_workspaces()
+            ws_result: dict = json.loads(ws_json)
+            workspaces = ws_result.get("workspaces", [])
             if workspaces:
                 ws_table = Table(title="[bold cyan]MSF Workspaces[/bold cyan]", border_style="cyan")
                 ws_table.add_column("Name", style="green")
                 ws_table.add_column("Scope", style="yellow")
                 ws_table.add_column("Hosts", style="cyan")
                 for ws in workspaces:
-                    ws_table.add_row(ws.name, ws.scope or "—", str(ws.host_count))
+                    ws_table.add_row(ws.get("name", "unknown"), ws.get("scope", "—"), str(ws.get("host_count", 0)))
                 console.print(ws_table)
 
             for record in records[:5]:
                 target = record.get("target", "")
-                if target and msf_client.check_host_exists(target, msf_cfg.workspace):
-                    console.print(f"[?] Host {target} already exists in workspace '{msf_cfg.workspace}'")
+                if target:
+                    check_json = msf_check_host_exists(target, msf_cfg.workspace)
+                    check_result: dict = json.loads(check_json)
+                    if check_result.get("exists"):
+                        console.print(f"[?] Host {target} already exists in workspace '{msf_cfg.workspace}'")
         else:
-            console.print("[!] Failed to authenticate to MSF-RPC. Skipping workspace checks.")
+            err = login_result.get("error", "Unknown error")
+            console.print(f"[yellow][!] Remote MSF-RPC unreachable. Switched entirely to offline matching matrix.[/yellow]")
+            console.print(f"[dim]   Error: {err}[/dim]")
 
     recipes = []
     if Confirm.ask("\n[?] Generate msfvenom payload recipes?", default=False):
@@ -194,8 +217,8 @@ def cmd_process(args: argparse.Namespace, config_mgr: ConfigManager) -> None:
         )
         console.print(f"\n[+] Report written to: {output_path}")
 
-    if msf_client:
-        msf_client.logout()
+    if msf_connected and HAS_RUST:
+        msf_logout()
 
     config_mgr.config.last_scan_file = str(input_path)
     config_mgr.save()
@@ -216,7 +239,6 @@ def cmd_share(args: argparse.Namespace) -> None:
             border_style="green",
         ))
 
-        import signal
         import time
         try:
             while True:
