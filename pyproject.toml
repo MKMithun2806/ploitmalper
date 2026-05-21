@@ -1,0 +1,30 @@
+[project]
+name = "ploit-malper"
+version = "0.1.0"
+description = "Vulnerability Post-Processing and Analysis Toolkit — deduplication, recon, and reporting for VulnMalper scan results"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "MKMithun2806", email = "mmithunkrish@gmail.com" }
+]
+dependencies = [
+    "rich>=13.7.0",
+    "requests>=2.31.0",
+    "msgpack>=1.0.7",
+]
+
+[project.scripts]
+ploit-malper = "ploit_malper.cli.main:entrypoint"
+
+[tool.maturin]
+module-name = "ploit_malper._core"
+python-packages = ["ploit_malper"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
