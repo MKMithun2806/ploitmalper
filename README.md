@@ -8,19 +8,19 @@
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-- 🧹 **Intelligent Deduplication**: Uses a specialized Rust engine to normalize and deduplicate findings using composite keys.
-- 🌐 **NVD CVE Enrichment**: Automatically fetches CVSS scores, severities, and descriptions from the NVD API with aggressive local caching.
-- 🎯 **Metasploit Integration**: Connects via MSF-RPC to verify existing hosts in workspaces and match findings to live sessions.
-- 🤖 **Automated Module Suggestions**: Analyzes service banners and titles against an internal expert system to suggest relevant Metasploit modules.
-- 📜 **Payload Recipe Builder**: Generates ready-to-use `msfvenom` commands for various platforms (Windows, Linux, macOS, etc.).
-- 📝 **Flexible Reporting**: Produces clean, professional Markdown reports with summary tables and deep-dive findings.
-- 🚀 **Instant Sharing**: Includes a built-in temporary file server to share reports across a network instantly.
+- **Intelligent Deduplication**: Uses a specialized Rust engine to normalize and deduplicate findings using composite keys.
+- **NVD CVE Enrichment**: Automatically fetches CVSS scores, severities, and descriptions from the NVD API with aggressive local caching.
+- **Metasploit Integration**: Connects via MSF-RPC to verify existing hosts in workspaces and match findings to live sessions.
+- **Automated Module Suggestions**: Analyzes service banners and titles against an internal expert system to suggest relevant Metasploit modules.
+- **Payload Recipe Builder**: Generates ready-to-use `msfvenom` commands for various platforms (Windows, Linux, macOS, etc.).
+- **Flexible Reporting**: Produces clean, professional Markdown reports with summary tables and deep-dive findings.
+- **Instant Sharing**: Includes a built-in temporary file server to share reports across a network instantly.
 
 ---
 
-## 🛠️ Prerequisites
+##Prerequisites
 
 PloitMalper leverages system utilities for lightweight HTTP transport:
 
@@ -30,7 +30,7 @@ PloitMalper leverages system utilities for lightweight HTTP transport:
 
 ---
 
-## 🚀 Installation
+## Installation
 
 ### Using Cargo (Recommended)
 
@@ -71,7 +71,7 @@ ploit-malper share --port 8888
 
 ---
 
-## 📖 Command Reference
+## Command Reference
 
 | Command | Description |
 | :--- | :--- |
@@ -82,7 +82,7 @@ ploit-malper share --port 8888
 
 ---
 
-## ⚙️ Configuration
+##Configuration
 
 Configuration and caches are stored in:
 - **Linux/macOS**: `~/.config/ploit_malper/`
@@ -90,7 +90,7 @@ Configuration and caches are stored in:
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
