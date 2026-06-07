@@ -1,50 +1,27 @@
-use pyo3::prelude::*;
-use serde::{Deserialize, Serialize};
+use crate::error::Result;
+use crate::models::ScanRecord;
+use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParsedFinding {
-    pub target: String,
-    pub tool: String,
-    pub title: String,
-    pub severity: String,
-    pub port: Option<u16>,
-    pub cve: Option<String>,
-    pub service: Option<String>,
-    pub raw: serde_json::Value,
-}
-
-#[pyfunction]
-fn parse_vulnmalper_json(json_input: &str) -> PyResult<String> {
-    let value: serde_json::Value = serde_json::from_str(json_input)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-
+pub fn parse_vulnmalper_json(json_input: &str) -> Result<Vec<ScanRecord>> {
+    let value: Value = serde_json::from_str(json_input)?;
     let findings = match value {
-        serde_json::Value::Array(arr) => parse_array(&arr),
-        serde_json::Value::Object(obj) => {
-            if let Some(results) = obj.get("results") {
-                if let Some(arr) = results.as_array() {
-                    parse_array(arr)
-                } else {
-                    vec![]
-                }
-            } else if let Some(findings) = obj.get("findings") {
-                if let Some(arr) = findings.as_array() {
-                    parse_array(arr)
-                } else {
-                    vec![]
-                }
+        Value::Array(arr) => parse_array(&arr),
+        Value::Object(obj) => {
+            if let Some(arr) = obj.get("results").and_then(Value::as_array) {
+                parse_array(arr)
+            } else if let Some(arr) = obj.get("findings").and_then(Value::as_array) {
+                parse_array(arr)
             } else {
-                vec![]
+                Vec::new()
             }
         }
-        _ => vec![],
+        _ => Vec::new(),
     };
 
-    serde_json::to_string(&findings)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    Ok(findings)
 }
 
-fn parse_array(arr: &[serde_json::Value]) -> Vec<ParsedFinding> {
+fn parse_array(arr: &[Value]) -> Vec<ScanRecord> {
     arr.iter()
         .filter_map(|v| {
             let target = v.get("target")?.as_str()?.to_string();
@@ -52,18 +29,20 @@ fn parse_array(arr: &[serde_json::Value]) -> Vec<ParsedFinding> {
             let title = v.get("title")?.as_str()?.to_string();
             let severity = v
                 .get("severity")
-                .and_then(|s| s.as_str())
+                .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string();
-            let port = v.get("port").and_then(|p| p.as_u64()).map(|p| p as u16);
-            let cve = v.get("cve").and_then(|c| c.as_str()).map(String::from);
+            let port = v
+                .get("port")
+                .and_then(Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok());
+            let cve = v.get("cve").and_then(Value::as_str).map(ToOwned::to_owned);
             let service = v
                 .get("service")
-                .and_then(|s| s.as_str())
-                .map(String::from);
-            let raw = v.clone();
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
 
-            Some(ParsedFinding {
+            Some(ScanRecord {
                 target,
                 tool,
                 title,
@@ -71,13 +50,22 @@ fn parse_array(arr: &[serde_json::Value]) -> Vec<ParsedFinding> {
                 port,
                 cve,
                 service,
-                raw,
+                raw: v.clone(),
+                ..Default::default()
             })
         })
         .collect()
 }
 
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(parse_vulnmalper_json, m)?)?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_results_array() {
+        let input = r#"{"results":[{"target":"10.0.0.1","tool":"nmap","title":"OpenSSH","severity":"high"}]}"#;
+        let records = parse_vulnmalper_json(input).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].target, "10.0.0.1");
+    }
 }

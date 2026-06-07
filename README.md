@@ -1,63 +1,41 @@
 # PloitMalper
 
-**Vulnerability Post-Processing and Analysis Toolkit**
-
-PloitMalper processes, deduplicates, and organizes vulnerability scan results from VulnMalper. It provides structural analysis, smart matching, NVD CVE enrichment, state tracking, and professional technical reporting.
+Vulnerability post-processing and analysis toolkit written entirely in Rust.
 
 ## Features
 
-- **Advanced Deduplication Engine** — Rust-powered deep deduplication based on composite keys (target + tool + normalized title)
-- **NVD CVE Enrichment** — Fetches CVSS v3 scores, severity ratings, descriptions, and references from the National Vulnerability Database API
-- **Target Recon & Module Suggestion** — Maps service banners and CVE IDs to Metasploit modules
-- **MSF-RPC Integration** — Cross-references target hosts against Metasploit workspace database
-- **Persistent State Configuration** — Securely caches MSF-RPC and NVD API credentials
-- **Command Recipe Builder** — Generates syntax-valid `msfvenom` reference commands for 6 platforms
-- **Rich Terminal Experience** — Color-coded severity tables, progress tracking, and Markdown reporting
+- Deduplicates VulnMalper scan results using a normalized composite key
+- Enriches CVEs from the NVD API with local caching
+- Suggests Metasploit modules from service banners and titles
+- Talks to Metasploit RPC for workspace and host verification
+- Generates Markdown reports
+- Serves reports over a temporary local file server
+- Builds `msfvenom` payload recipes
 
-## Architecture
-
-| Layer        | Technology          |
-|-------------|---------------------|
-| Core Engine | Rust (PyO3 + maturin) |
-| CLI / UI    | Python + Rich       |
-| Build       | uv + maturin        |
-
-## Installation
+## Build
 
 ```bash
-uv sync
-maturin develop
+cargo build --release
 ```
 
-## MSF-RPC Setup
+## Run
 
 ```bash
-load msgrpc ServerHost=127.0.0.1 ServerPort=55553 User=ploituder Pass=Mithun2806 SSL=false
+cargo run -- process scan.json
+cargo run -- setup
+cargo run -- share
+cargo run -- reset-config
 ```
 
-## Usage
+## Notes
 
-```bash
-ploit-malper                    # Launch interactive CLI
-ploit-malper setup              # Configure MSF-RPC and NVD API credentials
-ploit-malper process scan.json  # Process, deduplicate, and enrich scan results
-ploit-malper share              # Start temporary file server for reports
-ploit-malper reset-config       # Reset all stored credentials and NVD cache
-```
-
-## NVD API
-
-Get a free API key at https://nvd.nist.gov/developers/request-an-api-key
-
-Without an API key, the NVD API rate limits to 5 requests/30 seconds. With a key, you get 50 requests/30 seconds.
+- The `process` and `share` commands are implemented in Rust.
+- Live NVD and MSF-RPC requests use the system `curl` executable for HTTP transport.
+- Configuration is stored under `~/.config/ploit_malper/`.
 
 ## Development
 
 ```bash
-uv run maturin develop --release
 cargo test
+cargo fmt
 ```
-
-## License
-
-MIT

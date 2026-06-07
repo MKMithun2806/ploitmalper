@@ -1,60 +1,169 @@
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-use rmp_serde::Serializer;
-use rmpv::Value;
-use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::collections::BTreeMap;
+use std::process::{Command, Stdio};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSFWorkspaceInfo {
-    pub name: String,
-    pub scope: String,
-    pub host_count: u64,
-}
+use crate::error::Result;
+use crate::models::{
+    MSFHostCheckResult, MSFHostInfo, MSFHostsResult, MSFLoginResult, MSFWorkspaceInfo,
+    MSFWorkspacesResult,
+};
+use crate::msgpack::{decode, encode, MsgValue};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSFHostInfo {
-    pub address: String,
-    pub os_name: String,
-    pub os_flavor: String,
-    pub state: String,
-    pub notes_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSFLoginResult {
-    pub success: bool,
-    pub token: String,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSFWorkspacesResult {
-    pub workspaces: Vec<MSFWorkspaceInfo>,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSFHostsResult {
-    pub hosts: Vec<MSFHostInfo>,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MSFHostCheckResult {
-    pub exists: bool,
-    pub error: String,
-}
-
-struct MSFSession {
+#[derive(Debug, Clone)]
+pub struct MsfRpcClient {
     host: String,
     port: u16,
     ssl: bool,
+    username: String,
+    password: String,
     token: Option<String>,
 }
 
-lazy_static::lazy_static! {
-    static ref SESSION: Mutex<Option<MSFSession>> = Mutex::new(None);
+impl MsfRpcClient {
+    pub fn new(host: &str, port: u16, username: &str, password: &str, ssl: bool) -> Self {
+        Self {
+            host: host.to_string(),
+            port,
+            ssl,
+            username: username.to_string(),
+            password: password.to_string(),
+            token: None,
+        }
+    }
+
+    pub fn login(&mut self) -> Result<MSFLoginResult> {
+        let url = build_url(&self.host, self.port, self.ssl);
+        let payload = encode(&msg_map([
+            ("method", msg_str("auth.login")),
+            (
+                "params",
+                msg_array(vec![msg_str(&self.username), msg_str(&self.password)]),
+            ),
+        ]));
+
+        match send_request(&url, &payload, 10) {
+            Ok(val) => {
+                let success = val.get("result").and_then(MsgValue::as_str) == Some("success");
+                let token = val
+                    .get("token")
+                    .and_then(MsgValue::as_str)
+                    .unwrap_or("")
+                    .to_string();
+
+                if success && !token.is_empty() {
+                    self.token = Some(token.clone());
+                    Ok(MSFLoginResult {
+                        success: true,
+                        token,
+                        error: String::new(),
+                    })
+                } else {
+                    Ok(MSFLoginResult {
+                        success: false,
+                        token: String::new(),
+                        error: "Authentication failed".to_string(),
+                    })
+                }
+            }
+            Err(error) => Ok(MSFLoginResult {
+                success: false,
+                token: String::new(),
+                error,
+            }),
+        }
+    }
+
+    pub fn logout(&mut self) {
+        if let Some(token) = self.token.clone() {
+            let url = build_url(&self.host, self.port, self.ssl);
+            let payload = encode(&msg_map([
+                ("method", msg_str("auth.logout")),
+                ("params", msg_array(vec![msg_str(&token)])),
+            ]));
+            let _ = send_request(&url, &payload, 5);
+        }
+        self.token = None;
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        self.token.is_some()
+    }
+
+    pub fn get_workspaces(&self) -> Result<MSFWorkspacesResult> {
+        let token = match self.token.as_ref() {
+            Some(token) => token.clone(),
+            None => {
+                return Ok(MSFWorkspacesResult {
+                    workspaces: vec![],
+                    error: "Not authenticated".to_string(),
+                });
+            }
+        };
+
+        let url = build_url(&self.host, self.port, self.ssl);
+        let payload = encode(&msg_map([
+            ("method", msg_str("db.workspaces")),
+            ("params", msg_array(vec![msg_str(&token)])),
+        ]));
+
+        match send_request(&url, &payload, 15) {
+            Ok(val) => Ok(MSFWorkspacesResult {
+                workspaces: extract_workspaces(&val),
+                error: String::new(),
+            }),
+            Err(error) => Ok(MSFWorkspacesResult {
+                workspaces: vec![],
+                error,
+            }),
+        }
+    }
+
+    pub fn get_hosts(&self, workspace: Option<&str>) -> Result<MSFHostsResult> {
+        let token = match self.token.as_ref() {
+            Some(token) => token.clone(),
+            None => {
+                return Ok(MSFHostsResult {
+                    hosts: vec![],
+                    error: "Not authenticated".to_string(),
+                });
+            }
+        };
+
+        let url = build_url(&self.host, self.port, self.ssl);
+        let mut params = vec![msg_str(&token)];
+        if let Some(workspace) = workspace {
+            params.push(MsgValue::Map(BTreeMap::from([(
+                "workspace".to_string(),
+                msg_str(workspace),
+            )])));
+        }
+        let payload = encode(&msg_map([
+            ("method", msg_str("db.hosts")),
+            ("params", msg_array(params)),
+        ]));
+
+        match send_request(&url, &payload, 15) {
+            Ok(val) => Ok(MSFHostsResult {
+                hosts: extract_hosts(&val),
+                error: String::new(),
+            }),
+            Err(error) => Ok(MSFHostsResult {
+                hosts: vec![],
+                error,
+            }),
+        }
+    }
+
+    pub fn check_host_exists(
+        &self,
+        address: &str,
+        workspace: Option<&str>,
+    ) -> Result<MSFHostCheckResult> {
+        let hosts = self.get_hosts(workspace)?;
+        Ok(MSFHostCheckResult {
+            exists: hosts.hosts.iter().any(|host| host.address == address),
+            error: hosts.error,
+        })
+    }
 }
 
 fn build_url(host: &str, port: u16, ssl: bool) -> String {
@@ -62,290 +171,131 @@ fn build_url(host: &str, port: u16, ssl: bool) -> String {
     format!("{}://{}:{}/api/1.1", scheme, host, port)
 }
 
-fn encode_msgpack(method: &str, params: Vec<Value>) -> Vec<u8> {
-    let msg = Value::Map(vec![
-        (Value::String("method".into()), Value::String(method.into())),
-        (Value::String("params".into()), Value::Array(params)),
-    ]);
-    let mut buf = Vec::new();
-    msg.serialize(&mut Serializer::new(&mut buf)).unwrap();
-    buf
-}
-
-fn send_request(url: &str, payload: &[u8], timeout_secs: u64) -> Result<Value, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build();
-
-    let resp = agent
-        .post(url)
-        .set("Content-Type", "binary/message-pack")
-        .send_bytes(payload)
+fn send_request(
+    url: &str,
+    payload: &[u8],
+    timeout_secs: u64,
+) -> std::result::Result<MsgValue, String> {
+    let mut child = Command::new("curl")
+        .arg("-sS")
+        .arg("--fail")
+        .arg("--max-time")
+        .arg(timeout_secs.to_string())
+        .arg("-H")
+        .arg("Content-Type: binary/message-pack")
+        .arg("--data-binary")
+        .arg("@-")
+        .arg(url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
 
-    let mut reader = resp.into_reader();
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut reader, &mut bytes)
-        .map_err(|e| e.to_string())?;
-
-    let value: Value = rmp_serde::from_slice(&bytes)
-        .map_err(|e| format!("msgpack decode error: {}", e))?;
-
-    Ok(value)
-}
-
-fn extract_string(val: &Value) -> String {
-    match val {
-        Value::String(s) => s.as_str().unwrap_or("").to_string(),
-        _ => String::new(),
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin.write_all(payload).map_err(|e| e.to_string())?;
     }
-}
 
-fn extract_u64(val: &Value) -> u64 {
-    match val {
-        Value::Integer(i) => i.as_u64().unwrap_or(0),
-        Value::F64(f) => *f as u64,
-        _ => 0,
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+
+    decode(&output.stdout).map_err(|e| e.to_string())
 }
 
-fn val_str(s: &str) -> Value {
-    Value::String(s.into())
+fn msg_str(value: &str) -> MsgValue {
+    MsgValue::String(value.to_string())
 }
 
-#[pyfunction]
-fn msf_login(host: &str, port: u16, username: &str, password: &str, ssl: bool) -> PyResult<String> {
-    let url = build_url(host, port, ssl);
-    let params = vec![val_str(username), val_str(password)];
-    let payload = encode_msgpack("auth.login", params);
+fn msg_array(values: Vec<MsgValue>) -> MsgValue {
+    MsgValue::Array(values)
+}
 
-    let result = match send_request(&url, &payload, 10) {
-        Ok(val) => {
-            if let Value::Map(map) = &val {
-                for (k, v) in map {
-                    if let Value::String(key) = k {
-                        if key.as_str() == Some("result") {
-                            if extract_string(v) == "success" {
-                                for (k2, v2) in map {
-                                    if let Value::String(key2) = k2 {
-                                        if key2.as_str() == Some("token") {
-                                            let token = extract_string(v2);
-                                            let mut session = SESSION.lock().unwrap();
-                                            *session = Some(MSFSession {
-                                                host: host.to_string(),
-                                                port,
-                                                ssl,
-                                                token: Some(token.clone()),
-                                            });
-                                            return serde_json::to_string(&MSFLoginResult {
-                                                success: true,
-                                                token,
-                                                error: String::new(),
-                                            }).map_err(|e| PyValueError::new_err(e.to_string()));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+fn msg_map<const N: usize>(pairs: [(&str, MsgValue); N]) -> MsgValue {
+    let mut map = BTreeMap::new();
+    for (key, value) in pairs {
+        map.insert(key.to_string(), value);
+    }
+    MsgValue::Map(map)
+}
+
+fn extract_workspaces(val: &MsgValue) -> Vec<MSFWorkspaceInfo> {
+    let mut workspaces = Vec::new();
+    if let Some(map) = val.as_map() {
+        if let Some(MsgValue::Array(ws_arr)) = map.get("workspaces") {
+            for ws in ws_arr {
+                if let Some(ws_map) = ws.as_map() {
+                    let name = ws_map
+                        .get("name")
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let scope = ws_map
+                        .get("scope")
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let host_count = ws_map
+                        .get("hosts_count")
+                        .or_else(|| ws_map.get("host_count"))
+                        .and_then(MsgValue::as_u64)
+                        .unwrap_or(0);
+
+                    workspaces.push(MSFWorkspaceInfo {
+                        name,
+                        scope,
+                        host_count,
+                    });
                 }
             }
-            MSFLoginResult {
-                success: false,
-                token: String::new(),
-                error: "Authentication failed".to_string(),
-            }
-        }
-        Err(e) => MSFLoginResult {
-            success: false,
-            token: String::new(),
-            error: e,
-        }
-    };
-
-    serde_json::to_string(&result).map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-#[pyfunction]
-fn msf_logout() -> PyResult<()> {
-    let mut session = SESSION.lock().unwrap();
-    if let Some(s) = session.as_ref() {
-        if let Some(ref token) = s.token {
-            let url = build_url(&s.host, s.port, s.ssl);
-            let params = vec![val_str(token)];
-            let payload = encode_msgpack("auth.logout", params);
-            let _ = send_request(&url, &payload, 5);
         }
     }
-    *session = None;
-    Ok(())
+    workspaces
 }
 
-#[pyfunction]
-fn msf_is_authenticated() -> PyResult<bool> {
-    let session = SESSION.lock().unwrap();
-    Ok(session.as_ref().and_then(|s| s.token.as_ref()).is_some())
-}
+fn extract_hosts(val: &MsgValue) -> Vec<MSFHostInfo> {
+    let mut hosts = Vec::new();
+    if let Some(map) = val.as_map() {
+        if let Some(MsgValue::Array(host_arr)) = map.get("hosts") {
+            for host in host_arr {
+                if let Some(host_map) = host.as_map() {
+                    let address = host_map
+                        .get("address")
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let os_name = host_map
+                        .get("os_name")
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let os_flavor = host_map
+                        .get("os_flavor")
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let state = host_map
+                        .get("state")
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let notes_count = host_map
+                        .get("notes_count")
+                        .and_then(MsgValue::as_u64)
+                        .unwrap_or(0);
 
-#[pyfunction]
-fn msf_get_workspaces() -> PyResult<String> {
-    let session = SESSION.lock().unwrap();
-    let s = match session.as_ref() {
-        Some(s) => s,
-        None => {
-            return serde_json::to_string(&MSFWorkspacesResult {
-                workspaces: vec![],
-                error: "Not authenticated".to_string(),
-            }).map_err(|e| PyValueError::new_err(e.to_string()));
-        }
-    };
-
-    let token = s.token.clone().unwrap();
-    let url = build_url(&s.host, s.port, s.ssl);
-    let params = vec![val_str(&token)];
-    let payload = encode_msgpack("db.workspaces", params);
-
-    let result = match send_request(&url, &payload, 15) {
-        Ok(val) => {
-            let mut workspaces = Vec::new();
-            if let Value::Map(map) = &val {
-                for (k, v) in map {
-                    if let Value::String(key) = k {
-                        if key.as_str() == Some("workspaces") {
-                            if let Value::Array(ws_arr) = v {
-                                for ws in ws_arr {
-                                    if let Value::Map(ws_map) = ws {
-                                        let mut name = String::new();
-                                        let mut scope = String::new();
-                                        let mut host_count: u64 = 0;
-                                        for (wk, wv) in ws_map {
-                                            if let Value::String(wkey) = wk {
-                                                match wkey.as_str() {
-                                                    Some("name") => name = extract_string(wv),
-                                                    Some("scope") => scope = extract_string(wv),
-                                                    Some("hosts_count") => host_count = extract_u64(wv),
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                        workspaces.push(MSFWorkspaceInfo { name, scope, host_count });
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    hosts.push(MSFHostInfo {
+                        address,
+                        os_name,
+                        os_flavor,
+                        state,
+                        notes_count,
+                    });
                 }
             }
-            MSFWorkspacesResult {
-                workspaces,
-                error: String::new(),
-            }
         }
-        Err(e) => MSFWorkspacesResult {
-            workspaces: vec![],
-            error: e,
-        }
-    };
-
-    serde_json::to_string(&result).map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-#[pyfunction]
-fn msf_get_hosts(workspace: &str) -> PyResult<String> {
-    let session = SESSION.lock().unwrap();
-    let s = match session.as_ref() {
-        Some(s) => s,
-        None => {
-            return serde_json::to_string(&MSFHostsResult {
-                hosts: vec![],
-                error: "Not authenticated".to_string(),
-            }).map_err(|e| PyValueError::new_err(e.to_string()));
-        }
-    };
-
-    let token = s.token.clone().unwrap();
-    let url = build_url(&s.host, s.port, s.ssl);
-    let ws_filter = Value::Map(vec![
-        (Value::String("workspace".into()), val_str(workspace)),
-    ]);
-    let params = vec![val_str(&token), ws_filter];
-    let payload = encode_msgpack("db.hosts", params);
-
-    let result = match send_request(&url, &payload, 15) {
-        Ok(val) => {
-            let mut hosts = Vec::new();
-            if let Value::Map(map) = &val {
-                for (k, v) in map {
-                    if let Value::String(key) = k {
-                        if key.as_str() == Some("hosts") {
-                            if let Value::Array(h_arr) = v {
-                                for h in h_arr {
-                                    if let Value::Map(h_map) = h {
-                                        let mut address = String::new();
-                                        let mut os_name = String::new();
-                                        let mut os_flavor = String::new();
-                                        let mut state = String::new();
-                                        let mut notes_count: u64 = 0;
-                                        for (hk, hv) in h_map {
-                                            if let Value::String(hkey) = hk {
-                                                match hkey.as_str() {
-                                                    Some("address") => address = extract_string(hv),
-                                                    Some("os_name") => os_name = extract_string(hv),
-                                                    Some("os_flavor") => os_flavor = extract_string(hv),
-                                                    Some("state") => state = extract_string(hv),
-                                                    Some("notes_count") => notes_count = extract_u64(hv),
-                                                    _ => {}
-                                                }
-                                            }
-                                        }
-                                        hosts.push(MSFHostInfo {
-                                            address,
-                                            os_name,
-                                            os_flavor,
-                                            state,
-                                            notes_count,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            MSFHostsResult {
-                hosts,
-                error: String::new(),
-            }
-        }
-        Err(e) => MSFHostsResult {
-            hosts: vec![],
-            error: e,
-        }
-    };
-
-    serde_json::to_string(&result).map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-#[pyfunction]
-fn msf_check_host_exists(address: &str, workspace: &str) -> PyResult<String> {
-    let hosts_json = msf_get_hosts(workspace)?;
-    let hosts_result: MSFHostsResult = serde_json::from_str(&hosts_json)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let exists = hosts_result.hosts.iter().any(|h| h.address == address);
-
-    serde_json::to_string(&MSFHostCheckResult {
-        exists,
-        error: hosts_result.error,
-    }).map_err(|e| PyValueError::new_err(e.to_string()))
-}
-
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(msf_login, m)?)?;
-    m.add_function(wrap_pyfunction!(msf_logout, m)?)?;
-    m.add_function(wrap_pyfunction!(msf_is_authenticated, m)?)?;
-    m.add_function(wrap_pyfunction!(msf_get_workspaces, m)?)?;
-    m.add_function(wrap_pyfunction!(msf_get_hosts, m)?)?;
-    m.add_function(wrap_pyfunction!(msf_check_host_exists, m)?)?;
-    Ok(())
+    }
+    hosts
 }

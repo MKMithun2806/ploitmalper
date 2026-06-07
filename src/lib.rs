@@ -1,12 +1,10 @@
-use pyo3::prelude::*;
-
-mod engine;
-
-#[pymodule]
-fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    engine::dedup::register(m)?;
-    engine::parser::register(m)?;
-    engine::matcher::register(m)?;
-    engine::msfrpc::register(m)?;
-    Ok(())
-}
+pub mod cli;
+pub mod config;
+pub mod engine;
+pub mod error;
+pub mod models;
+pub mod msgpack;
+pub mod nvd;
+pub mod recipe;
+pub mod report;
+pub mod share;
