@@ -52,18 +52,10 @@ impl Default for MSFRPCConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct NVDConfig {
     pub api_key: String,
-}
-
-impl Default for NVDConfig {
-    fn default() -> Self {
-        Self {
-            api_key: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,5 +154,11 @@ impl ConfigManager {
 
     pub fn get_nvd_config(&self) -> &NVDConfig {
         &self.config.nvd
+    }
+}
+
+impl Default for ConfigManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
