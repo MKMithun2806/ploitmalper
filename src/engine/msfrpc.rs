@@ -32,12 +32,11 @@ impl MsfRpcClient {
 
     pub fn login(&mut self) -> Result<MSFLoginResult> {
         let url = build_url(&self.host, self.port, self.ssl);
-        let payload = encode(&msg_map([
-            ("method", msg_str("auth.login")),
-            (
-                "params",
-                msg_array(vec![msg_str(&self.username), msg_str(&self.password)]),
-            ),
+        // Array format: [method, ...params]
+        let payload = encode(&msg_array(vec![
+            msg_str("auth.login"),
+            msg_str(&self.username),
+            msg_str(&self.password),
         ]));
 
         match send_request(&url, &payload, 10) {
@@ -57,10 +56,15 @@ impl MsfRpcClient {
                         error: String::new(),
                     })
                 } else {
+                    let error_msg = val
+                        .get("error_message")
+                        .or_else(|| val.get("error_string"))
+                        .and_then(MsgValue::as_str)
+                        .unwrap_or("Authentication failed");
                     Ok(MSFLoginResult {
                         success: false,
                         token: String::new(),
-                        error: "Authentication failed".to_string(),
+                        error: error_msg.to_string(),
                     })
                 }
             }
@@ -75,10 +79,8 @@ impl MsfRpcClient {
     pub fn logout(&mut self) {
         if let Some(token) = self.token.clone() {
             let url = build_url(&self.host, self.port, self.ssl);
-            let payload = encode(&msg_map([
-                ("method", msg_str("auth.logout")),
-                ("params", msg_array(vec![msg_str(&token)])),
-            ]));
+            // Array format: [method, token]
+            let payload = encode(&msg_array(vec![msg_str("auth.logout"), msg_str(&token)]));
             let _ = send_request(&url, &payload, 5);
         }
         self.token = None;
@@ -100,9 +102,10 @@ impl MsfRpcClient {
         };
 
         let url = build_url(&self.host, self.port, self.ssl);
-        let payload = encode(&msg_map([
-            ("method", msg_str("db.workspaces")),
-            ("params", msg_array(vec![msg_str(&token)])),
+        // Array format: [method, token]
+        let payload = encode(&msg_array(vec![
+            msg_str("db.workspaces"),
+            msg_str(&token),
         ]));
 
         match send_request(&url, &payload, 15) {
@@ -129,17 +132,19 @@ impl MsfRpcClient {
         };
 
         let url = build_url(&self.host, self.port, self.ssl);
-        let mut params = vec![msg_str(&token)];
+        // Array format: [method, token, options_hash]
+        // The RPC dispatcher extracts the token from args for auth,
+        // so we need the workspace filter as the next parameter
+        let mut params = vec![msg_str("db.hosts"), msg_str(&token)];
         if let Some(workspace) = workspace {
             params.push(MsgValue::Map(BTreeMap::from([(
                 "workspace".to_string(),
                 msg_str(workspace),
             )])));
+        } else {
+            params.push(MsgValue::Map(BTreeMap::new()));
         }
-        let payload = encode(&msg_map([
-            ("method", msg_str("db.hosts")),
-            ("params", msg_array(params)),
-        ]));
+        let payload = encode(&msg_array(params));
 
         match send_request(&url, &payload, 15) {
             Ok(val) => Ok(MSFHostsResult {
@@ -168,7 +173,7 @@ impl MsfRpcClient {
 
 fn build_url(host: &str, port: u16, ssl: bool) -> String {
     let scheme = if ssl { "https" } else { "http" };
-    format!("{}://{}:{}/api/1.1", scheme, host, port)
+    format!("{}://{}:{}/api/", scheme, host, port)
 }
 
 fn send_request(
@@ -178,11 +183,13 @@ fn send_request(
 ) -> std::result::Result<MsgValue, String> {
     let mut child = Command::new("curl")
         .arg("-sS")
-        .arg("--fail")
         .arg("--max-time")
         .arg(timeout_secs.to_string())
         .arg("-H")
         .arg("Content-Type: binary/message-pack")
+        .arg("-H")
+        .arg("Accept: binary/message-pack")
+        .arg("-i")
         .arg("--data-binary")
         .arg("@-")
         .arg(url)
@@ -190,19 +197,59 @@ fn send_request(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("failed to spawn curl: {e}"))?;
 
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
-        stdin.write_all(payload).map_err(|e| e.to_string())?;
+        stdin.write_all(payload).map_err(|e| format!("failed to write request body: {e}"))?;
     }
 
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    let output = child.wait_with_output().map_err(|e| format!("curl wait failed: {e}"))?;
+
+    let stdout = &output.stdout;
+    if stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !stderr.is_empty() {
+            return Err(stderr);
+        }
+        return Err("empty response from server".to_string());
     }
 
-    decode(&output.stdout).map_err(|e| e.to_string())
+    // Split headers from body (curl -i includes headers in stdout)
+    let body = if let Some(pos) = find_header_body_boundary(stdout) {
+        let header_part = String::from_utf8_lossy(&stdout[..pos]);
+        let status_line = header_part.lines().next().unwrap_or("unknown");
+        eprintln!("[MSF-RPC] HTTP {status_line}");
+        &stdout[pos..]
+    } else {
+        &stdout[..]
+    };
+
+    if body.is_empty() {
+        return Err("empty response body from server".to_string());
+    }
+
+    decode(body).map_err(|e| {
+        let dump_len = body.len().min(512);
+        let hex_dump: Vec<String> = body[..dump_len]
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        let utf8_dump = String::from_utf8_lossy(&body[..dump_len]);
+        format!(
+            "{}\n  response body hex ({} bytes): {}\n  response body utf8: {}",
+            e,
+            dump_len,
+            hex_dump.join(" "),
+            utf8_dump
+        )
+    })
+}
+
+fn find_header_body_boundary(data: &[u8]) -> Option<usize> {
+    data.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
 }
 
 fn msg_str(value: &str) -> MsgValue {
@@ -211,14 +258,6 @@ fn msg_str(value: &str) -> MsgValue {
 
 fn msg_array(values: Vec<MsgValue>) -> MsgValue {
     MsgValue::Array(values)
-}
-
-fn msg_map<const N: usize>(pairs: [(&str, MsgValue); N]) -> MsgValue {
-    let mut map = BTreeMap::new();
-    for (key, value) in pairs {
-        map.insert(key.to_string(), value);
-    }
-    MsgValue::Map(map)
 }
 
 fn extract_workspaces(val: &MsgValue) -> Vec<MSFWorkspaceInfo> {

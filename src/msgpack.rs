@@ -8,6 +8,7 @@ pub enum MsgValue {
     Bool(bool),
     Int(i64),
     UInt(u64),
+    Float(f64),
     String(String),
     Array(Vec<MsgValue>),
     Map(BTreeMap<String, MsgValue>),
@@ -74,6 +75,10 @@ fn encode_value(value: &MsgValue, buffer: &mut Vec<u8>) {
         MsgValue::Bool(true) => buffer.push(0xc3),
         MsgValue::Int(value) => encode_int(*value, buffer),
         MsgValue::UInt(value) => encode_uint(*value, buffer),
+        MsgValue::Float(value) => {
+            buffer.push(0xcb);
+            buffer.extend_from_slice(&value.to_be_bytes());
+        }
         MsgValue::String(value) => encode_str(value, buffer),
         MsgValue::Array(values) => encode_array(values, buffer),
         MsgValue::Map(map) => encode_map(map, buffer),
@@ -187,6 +192,55 @@ fn decode_value(bytes: &[u8], index: usize) -> Result<(MsgValue, usize)> {
         0xc0 => Ok((MsgValue::Nil, index + 1)),
         0xc2 => Ok((MsgValue::Bool(false), index + 1)),
         0xc3 => Ok((MsgValue::Bool(true), index + 1)),
+        0xc4 => {
+            let len = read_u8(bytes, index + 1)? as usize;
+            let slice = bytes
+                .get(index + 2..index + 2 + len)
+                .ok_or_else(|| {
+                    AppError::Msgpack("unexpected end of msgpack binary data".to_string())
+                })?;
+            let value = String::from_utf8_lossy(slice).into_owned();
+            Ok((MsgValue::String(value), index + 2 + len))
+        }
+        0xc5 => {
+            let len = read_u16(bytes, index + 1)? as usize;
+            let slice = bytes
+                .get(index + 3..index + 3 + len)
+                .ok_or_else(|| {
+                    AppError::Msgpack("unexpected end of msgpack binary data".to_string())
+                })?;
+            let value = String::from_utf8_lossy(slice).into_owned();
+            Ok((MsgValue::String(value), index + 3 + len))
+        }
+        0xc6 => {
+            let len = read_u32(bytes, index + 1)? as usize;
+            let slice = bytes
+                .get(index + 5..index + 5 + len)
+                .ok_or_else(|| {
+                    AppError::Msgpack("unexpected end of msgpack binary data".to_string())
+                })?;
+            let value = String::from_utf8_lossy(slice).into_owned();
+            Ok((MsgValue::String(value), index + 5 + len))
+        }
+        0xca => {
+            let end = index + 5;
+            let slice = bytes
+                .get(index + 1..end)
+                .ok_or_else(|| AppError::Msgpack("unexpected end of msgpack payload".to_string()))?;
+            let value = f32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]);
+            Ok((MsgValue::Float(value as f64), end))
+        }
+        0xcb => {
+            let end = index + 9;
+            let slice = bytes
+                .get(index + 1..end)
+                .ok_or_else(|| AppError::Msgpack("unexpected end of msgpack payload".to_string()))?;
+            let value = f64::from_be_bytes([
+                slice[0], slice[1], slice[2], slice[3],
+                slice[4], slice[5], slice[6], slice[7],
+            ]);
+            Ok((MsgValue::Float(value), end))
+        }
         0xcc => {
             let value = read_u8(bytes, index + 1)? as u64;
             Ok((MsgValue::UInt(value), index + 2))
@@ -351,4 +405,248 @@ fn read_u64(bytes: &[u8], index: usize) -> Result<u64> {
 
 fn read_i64(bytes: &[u8], index: usize) -> Result<i64> {
     Ok(i64::from_be_bytes(read_u64(bytes, index)?.to_be_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_nil() {
+        let v = MsgValue::Nil;
+        let bytes = encode(&v);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_bool() {
+        for b in [true, false] {
+            let v = MsgValue::Bool(b);
+            let bytes = encode(&v);
+            let decoded = decode(&bytes).unwrap();
+            assert_eq!(v, decoded);
+        }
+    }
+
+    #[test]
+    fn roundtrip_positive_fixint() {
+        for i in [0u64, 1, 127] {
+            let v = MsgValue::UInt(i);
+            let bytes = encode(&v);
+            let decoded = decode(&bytes).unwrap();
+            assert_eq!(v, decoded);
+        }
+    }
+
+    #[test]
+    fn roundtrip_u8() {
+        let v = MsgValue::UInt(200);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0xcc);
+        assert_eq!(bytes[1], 200);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_u16() {
+        let v = MsgValue::UInt(1000);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0xcd);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_u32() {
+        let v = MsgValue::UInt(100_000);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0xce);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_negative_fixint() {
+        for i in [-1i64, -32] {
+            let v = MsgValue::Int(i);
+            let bytes = encode(&v);
+            let decoded = decode(&bytes).unwrap();
+            assert_eq!(v, decoded);
+        }
+    }
+
+    #[test]
+    fn roundtrip_i8() {
+        let v = MsgValue::Int(-100);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0xd0);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_fixstr() {
+        let v = MsgValue::String("hello".to_string());
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0xa5);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_str8() {
+        let s = "a".repeat(32);
+        let v = MsgValue::String(s);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0xd9);
+        assert_eq!(bytes[1], 32);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_fixarray() {
+        let v = MsgValue::Array(vec![
+            MsgValue::UInt(1),
+            MsgValue::String("two".to_string()),
+            MsgValue::Bool(true),
+        ]);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0x93);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn roundtrip_fixmap() {
+        let mut map = BTreeMap::new();
+        map.insert("key".to_string(), MsgValue::String("value".to_string()));
+        let v = MsgValue::Map(map);
+        let bytes = encode(&v);
+        assert_eq!(bytes[0], 0x81);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
+
+    #[test]
+    fn decode_bin8() {
+        // bin 8 format: 0xc4 <len> <bytes>
+        let bytes = vec![0xc4, 0x05, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded, MsgValue::String("hello".to_string()));
+    }
+
+    #[test]
+    fn decode_bin16() {
+        // bin 16 format: 0xc5 <len_u16_be> <bytes>
+        let mut bytes = vec![0xc5, 0x00, 0x05, 0x77, 0x6f, 0x72, 0x6c, 0x64];
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded, MsgValue::String("world".to_string()));
+
+        // Larger string
+        let long = "x".repeat(300);
+        bytes = vec![0xc5, 0x01, 0x2c];
+        bytes.extend_from_slice(long.as_bytes());
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded, MsgValue::String(long));
+    }
+
+    #[test]
+    fn decode_bin32() {
+        let long = "z".repeat(70000);
+        let mut bytes = vec![0xc6, 0x00, 0x01, 0x11, 0x70];
+        bytes.extend_from_slice(long.as_bytes());
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded, MsgValue::String(long));
+    }
+
+    #[test]
+    fn decode_float32() {
+        let mut bytes = vec![0xca];
+        bytes.extend_from_slice(&3.14f32.to_be_bytes());
+        let decoded = decode(&bytes).unwrap();
+        match decoded {
+            MsgValue::Float(f) => assert!((f - 3.14).abs() < 0.001),
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn decode_float64() {
+        let mut bytes = vec![0xcb];
+        bytes.extend_from_slice(&std::f64::consts::PI.to_be_bytes());
+        let decoded = decode(&bytes).unwrap();
+        match decoded {
+            MsgValue::Float(f) => assert!((f - std::f64::consts::PI).abs() < 1e-15),
+            _ => panic!("expected Float"),
+        }
+    }
+
+    #[test]
+    fn decode_msf_auth_response() {
+        // Simulated MSF-RPC auth.login response:
+        // {"result": "success", "token": "abcd1234"}
+        let mut bytes = Vec::new();
+        // fixmap with 2 elements
+        bytes.push(0x82);
+        // bin 8 "result"
+        bytes.extend_from_slice(&[0xc4, 0x06, 0x72, 0x65, 0x73, 0x75, 0x6c, 0x74]);
+        // bin 8 "success"
+        bytes.extend_from_slice(&[0xc4, 0x07, 0x73, 0x75, 0x63, 0x63, 0x65, 0x73, 0x73]);
+        // bin 8 "token"
+        bytes.extend_from_slice(&[0xc4, 0x05, 0x74, 0x6f, 0x6b, 0x65, 0x6e]);
+        // bin 8 "abcd1234"
+        bytes.extend_from_slice(&[0xc4, 0x08, 0x61, 0x62, 0x63, 0x64, 0x31, 0x32, 0x33, 0x34]);
+
+        let decoded = decode(&bytes).unwrap();
+        let result = decoded.get("result").and_then(|v| v.as_str()).unwrap();
+        let token = decoded.get("token").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(result, "success");
+        assert_eq!(token, "abcd1234");
+    }
+
+    #[test]
+    fn decode_msf_error_response() {
+        // Simulated MSF error response using bin 8 for error_string
+        // {"error": true, "error_string": "Invalid Message Format"}
+        let mut bytes = Vec::new();
+        bytes.push(0x82); // fixmap 2
+        bytes.extend_from_slice(&[0xc4, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72]); // bin8 "error"
+        bytes.push(0xc3); // true
+        bytes.extend_from_slice(&[0xc4, 0x0c, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x5f, 0x73, 0x74, 0x72, 0x69, 0x6e, 0x67]); // bin8 "error_string"
+        bytes.extend_from_slice(&[0xc4, 0x16, 0x49, 0x6e, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x20, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x20, 0x46, 0x6f, 0x72, 0x6d, 0x61, 0x74]); // bin8 "Invalid Message Format"
+
+        let decoded = decode(&bytes).unwrap();
+        let error = decoded.get("error").unwrap();
+        assert_eq!(error, &MsgValue::Bool(true));
+        let error_string = decoded.get("error_string").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(error_string, "Invalid Message Format");
+    }
+
+    #[test]
+    fn decode_trailing_bytes_fails() {
+        let mut bytes = vec![0xa5, 0x68, 0x65, 0x6c, 0x6c, 0x6f]; // fixstr "hello"
+        bytes.push(0x00); // extra byte
+        let result = decode(&bytes);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("trailing bytes"));
+    }
+
+    #[test]
+    fn encode_array_format_auth_login() {
+        // Test encoding in the format the MSF server expects:
+        // ["auth.login", "Mithun", "Mithun@2806"]
+        let v = MsgValue::Array(vec![
+            MsgValue::String("auth.login".to_string()),
+            MsgValue::String("Mithun".to_string()),
+            MsgValue::String("Mithun@2806".to_string()),
+        ]);
+        let bytes = encode(&v);
+        // Should be 0x93 (fixarray 3) + 3 strings
+        assert_eq!(bytes[0], 0x93);
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(v, decoded);
+    }
 }

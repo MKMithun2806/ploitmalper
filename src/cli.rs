@@ -397,14 +397,19 @@ fn prompt_bool_with_default(prompt: &str, default: bool) -> Result<bool> {
 }
 
 fn prompt_choice(prompt: &str, choices: &[String], default: &str) -> Result<String> {
+    let resolved_default = if choices.iter().any(|c| c == default) {
+        default.to_string()
+    } else {
+        choices.first().cloned().unwrap_or_default()
+    };
     loop {
-        print!("  {} [{}]: ", prompt, default);
+        print!("  {} [{}]: ", prompt, resolved_default);
         io::stdout().flush()?;
         let mut buffer = String::new();
         io::stdin().read_line(&mut buffer)?;
         let value = buffer.trim();
         if value.is_empty() {
-            return Ok(default.to_string());
+            return Ok(resolved_default);
         }
         if choices.iter().any(|choice| choice == value) {
             return Ok(value.to_string());
