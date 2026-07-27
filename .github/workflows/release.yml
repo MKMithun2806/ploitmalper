@@ -18,7 +18,6 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +58,8 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          set -euo pipefail
+
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             cross build --release --target ${{ matrix.target }}
           else
@@ -68,6 +69,8 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          set -euo pipefail
+
           BIN="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext }}"
           NAME="${{ env.BINARY_NAME }}-${{ inputs.version }}-${{ matrix.target }}"
 
@@ -77,17 +80,17 @@ jobs:
             exit 1
           fi
 
-          mkdir package
+          mkdir -p package
           cp "$BIN" package/
 
           if [ "${{ matrix.archive }}" = "zip" ]; then
             cd package
             7z a "../${NAME}.zip" *
             cd ..
-            echo "ARCHIVE=${NAME}.zip" >> $GITHUB_ENV
+            echo "ARCHIVE=${NAME}.zip" >> "$GITHUB_ENV"
           else
             tar -czf "${NAME}.tar.gz" -C package .
-            echo "ARCHIVE=${NAME}.tar.gz" >> $GITHUB_ENV
+            echo "ARCHIVE=${NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
 
       - uses: actions/upload-artifact@v4
@@ -106,9 +109,11 @@ jobs:
           path: artifacts
 
       - name: Generate checksums
+        shell: bash
         run: |
-          find artifacts -type f -exec sha256sum {} \; | \
-          sed 's|artifacts/||' > SHA256SUMS.txt
+          set -euo pipefail
+          find artifacts -type f -exec sha256sum {} \; | sed 's|artifacts/||' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -120,19 +125,30 @@ jobs:
     needs:
       - build
       - checksums
-
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -lah dist
+
       - name: Publish Release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
+          set -euo pipefail
           gh release create "${{ inputs.version }}" \
             --title "${{ inputs.version }}" \
             --generate-notes \
-            artifacts/**/*
+            dist/*
