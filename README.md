@@ -3,6 +3,8 @@
 [![Crates.io](https://img.shields.io/crates/v/ploit-malper.svg)](https://crates.io/crates/ploit-malper)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-blue.svg)](https://www.rust-lang.org)
+[![CI](https://github.com/MKMithun2806/ploitmalper/actions/workflows/ci.yml/badge.svg)](https://github.com/MKMithun2806/ploitmalper/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-manual-blueviolet)](https://github.com/MKMithun2806/ploitmalper/actions/workflows/release.yml)
 
 **PloitMalper** is a high-performance vulnerability post-processing and analysis toolkit written in Rust. It streamlines the transition from raw scan data to actionable exploitation intelligence by deduplicating results, enriching CVE data, and suggesting Metasploit modules.
 
@@ -20,7 +22,7 @@
 
 ---
 
-##Prerequisites
+## Prerequisites
 
 PloitMalper leverages system utilities for lightweight HTTP transport:
 
@@ -32,6 +34,12 @@ PloitMalper leverages system utilities for lightweight HTTP transport:
 
 ## Installation
 
+### Prebuilt Binaries (Linux, macOS, Windows)
+
+Download the latest release archive for your platform from the [Releases page](https://github.com/MKMithun2806/ploitmalper/releases). Each archive contains a single statically-linked binary.
+
+Releases are built manually via the [Release workflow](https://github.com/MKMithun2806/ploitmalper/actions/workflows/release.yml) — trigger it with the desired version tag (e.g., `v0.1.1`) to produce binaries for all targets.
+
 ### Using Cargo (Recommended)
 
 ```bash
@@ -41,7 +49,7 @@ cargo install ploit-malper
 ### From Source
 
 ```bash
-git clone https://github.com/your-username/ploitmalper.git
+git clone https://github.com/MKMithun2806/ploitmalper.git
 cd ploitmalper
 cargo build --release
 cp target/release/ploit-malper /usr/local/bin/
@@ -82,7 +90,7 @@ ploit-malper share --port 8888
 
 ---
 
-##Configuration
+## Configuration
 
 Configuration and caches are stored in:
 - **Linux/macOS**: `~/.config/ploit_malper/`
