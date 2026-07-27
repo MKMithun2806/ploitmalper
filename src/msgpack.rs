@@ -194,50 +194,43 @@ fn decode_value(bytes: &[u8], index: usize) -> Result<(MsgValue, usize)> {
         0xc3 => Ok((MsgValue::Bool(true), index + 1)),
         0xc4 => {
             let len = read_u8(bytes, index + 1)? as usize;
-            let slice = bytes
-                .get(index + 2..index + 2 + len)
-                .ok_or_else(|| {
-                    AppError::Msgpack("unexpected end of msgpack binary data".to_string())
-                })?;
+            let slice = bytes.get(index + 2..index + 2 + len).ok_or_else(|| {
+                AppError::Msgpack("unexpected end of msgpack binary data".to_string())
+            })?;
             let value = String::from_utf8_lossy(slice).into_owned();
             Ok((MsgValue::String(value), index + 2 + len))
         }
         0xc5 => {
             let len = read_u16(bytes, index + 1)? as usize;
-            let slice = bytes
-                .get(index + 3..index + 3 + len)
-                .ok_or_else(|| {
-                    AppError::Msgpack("unexpected end of msgpack binary data".to_string())
-                })?;
+            let slice = bytes.get(index + 3..index + 3 + len).ok_or_else(|| {
+                AppError::Msgpack("unexpected end of msgpack binary data".to_string())
+            })?;
             let value = String::from_utf8_lossy(slice).into_owned();
             Ok((MsgValue::String(value), index + 3 + len))
         }
         0xc6 => {
             let len = read_u32(bytes, index + 1)? as usize;
-            let slice = bytes
-                .get(index + 5..index + 5 + len)
-                .ok_or_else(|| {
-                    AppError::Msgpack("unexpected end of msgpack binary data".to_string())
-                })?;
+            let slice = bytes.get(index + 5..index + 5 + len).ok_or_else(|| {
+                AppError::Msgpack("unexpected end of msgpack binary data".to_string())
+            })?;
             let value = String::from_utf8_lossy(slice).into_owned();
             Ok((MsgValue::String(value), index + 5 + len))
         }
         0xca => {
             let end = index + 5;
-            let slice = bytes
-                .get(index + 1..end)
-                .ok_or_else(|| AppError::Msgpack("unexpected end of msgpack payload".to_string()))?;
+            let slice = bytes.get(index + 1..end).ok_or_else(|| {
+                AppError::Msgpack("unexpected end of msgpack payload".to_string())
+            })?;
             let value = f32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]);
             Ok((MsgValue::Float(value as f64), end))
         }
         0xcb => {
             let end = index + 9;
-            let slice = bytes
-                .get(index + 1..end)
-                .ok_or_else(|| AppError::Msgpack("unexpected end of msgpack payload".to_string()))?;
+            let slice = bytes.get(index + 1..end).ok_or_else(|| {
+                AppError::Msgpack("unexpected end of msgpack payload".to_string())
+            })?;
             let value = f64::from_be_bytes([
-                slice[0], slice[1], slice[2], slice[3],
-                slice[4], slice[5], slice[6], slice[7],
+                slice[0], slice[1], slice[2], slice[3], slice[4], slice[5], slice[6], slice[7],
             ]);
             Ok((MsgValue::Float(value), end))
         }
@@ -615,13 +608,21 @@ mod tests {
         bytes.push(0x82); // fixmap 2
         bytes.extend_from_slice(&[0xc4, 0x05, 0x65, 0x72, 0x72, 0x6f, 0x72]); // bin8 "error"
         bytes.push(0xc3); // true
-        bytes.extend_from_slice(&[0xc4, 0x0c, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x5f, 0x73, 0x74, 0x72, 0x69, 0x6e, 0x67]); // bin8 "error_string"
-        bytes.extend_from_slice(&[0xc4, 0x16, 0x49, 0x6e, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x20, 0x4d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0x20, 0x46, 0x6f, 0x72, 0x6d, 0x61, 0x74]); // bin8 "Invalid Message Format"
+        bytes.extend_from_slice(&[
+            0xc4, 0x0c, 0x65, 0x72, 0x72, 0x6f, 0x72, 0x5f, 0x73, 0x74, 0x72, 0x69, 0x6e, 0x67,
+        ]); // bin8 "error_string"
+        bytes.extend_from_slice(&[
+            0xc4, 0x16, 0x49, 0x6e, 0x76, 0x61, 0x6c, 0x69, 0x64, 0x20, 0x4d, 0x65, 0x73, 0x73,
+            0x61, 0x67, 0x65, 0x20, 0x46, 0x6f, 0x72, 0x6d, 0x61, 0x74,
+        ]); // bin8 "Invalid Message Format"
 
         let decoded = decode(&bytes).unwrap();
         let error = decoded.get("error").unwrap();
         assert_eq!(error, &MsgValue::Bool(true));
-        let error_string = decoded.get("error_string").and_then(|v| v.as_str()).unwrap();
+        let error_string = decoded
+            .get("error_string")
+            .and_then(|v| v.as_str())
+            .unwrap();
         assert_eq!(error_string, "Invalid Message Format");
     }
 

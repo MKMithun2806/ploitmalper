@@ -103,10 +103,7 @@ impl MsfRpcClient {
 
         let url = build_url(&self.host, self.port, self.ssl);
         // Array format: [method, token]
-        let payload = encode(&msg_array(vec![
-            msg_str("db.workspaces"),
-            msg_str(&token),
-        ]));
+        let payload = encode(&msg_array(vec![msg_str("db.workspaces"), msg_str(&token)]));
 
         match send_request(&url, &payload, 15) {
             Ok(val) => Ok(MSFWorkspacesResult {
@@ -201,10 +198,14 @@ fn send_request(
 
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
-        stdin.write_all(payload).map_err(|e| format!("failed to write request body: {e}"))?;
+        stdin
+            .write_all(payload)
+            .map_err(|e| format!("failed to write request body: {e}"))?;
     }
 
-    let output = child.wait_with_output().map_err(|e| format!("curl wait failed: {e}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("curl wait failed: {e}"))?;
 
     let stdout = &output.stdout;
     if stdout.is_empty() {

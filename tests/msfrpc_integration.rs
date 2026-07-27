@@ -28,7 +28,9 @@ fn rpc_call(method: &str, params: &[MsgValue]) -> Result<MsgValue, String> {
 
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
-        stdin.write_all(&payload).map_err(|e| format!("write: {e}"))?;
+        stdin
+            .write_all(&payload)
+            .map_err(|e| format!("write: {e}"))?;
     }
 
     let output = child.wait_with_output().map_err(|e| format!("wait: {e}"))?;
@@ -80,15 +82,27 @@ fn test_msgpack_bin8_decoding() {
     data.extend_from_slice(b"\xc4\x06abc123");
 
     let decoded = decode(&data).unwrap();
-    assert_eq!(decoded.get("result").and_then(|v| v.as_str()), Some("success"));
-    assert_eq!(decoded.get("token").and_then(|v| v.as_str()), Some("abc123"));
+    assert_eq!(
+        decoded.get("result").and_then(|v| v.as_str()),
+        Some("success")
+    );
+    assert_eq!(
+        decoded.get("token").and_then(|v| v.as_str()),
+        Some("abc123")
+    );
 }
 
 #[test]
 fn test_recipe_invalid_payload_fallback() {
     // Test that unknown platform/arch combinations produce valid payload names
     let recipe = ploit_malper::recipe::build_recipe(
-        "python", "x64", "10.0.0.1", 4444, "/tmp/test", None, None,
+        "python",
+        "x64",
+        "10.0.0.1",
+        4444,
+        "/tmp/test",
+        None,
+        None,
     );
     // Should NOT produce "python/x64/meterpreter/reverse_tcp"
     assert!(
@@ -118,12 +132,21 @@ fn test_recipe_valid_payloads() {
 
     for (platform, arch, expected_payload) in test_cases {
         let recipe = ploit_malper::recipe::build_recipe(
-            platform, arch, "10.0.0.1", 4444, "/tmp/test", None, None,
+            platform,
+            arch,
+            "10.0.0.1",
+            4444,
+            "/tmp/test",
+            None,
+            None,
         );
         assert!(
             recipe.command.contains(expected_payload),
             "Platform={}, Arch={}: expected payload '{}' not found in command: {}",
-            platform, arch, expected_payload, recipe.command
+            platform,
+            arch,
+            expected_payload,
+            recipe.command
         );
     }
 }
@@ -138,10 +161,14 @@ fn test_msfrpc_login_integration() {
         return;
     }
 
-    let result = rpc_call("auth.login", &[
-        MsgValue::String("Mithun".to_string()),
-        MsgValue::String("Mithun@2806".to_string()),
-    ]).expect("RPC call failed");
+    let result = rpc_call(
+        "auth.login",
+        &[
+            MsgValue::String("Mithun".to_string()),
+            MsgValue::String("Mithun@2806".to_string()),
+        ],
+    )
+    .expect("RPC call failed");
 
     let success = result.get("result").and_then(|v| v.as_str()) == Some("success");
     let token = result.get("token").and_then(|v| v.as_str()).unwrap_or("");
@@ -158,16 +185,19 @@ fn test_msfrpc_workspaces_integration() {
     }
 
     // Login first
-    let login = rpc_call("auth.login", &[
-        MsgValue::String("Mithun".to_string()),
-        MsgValue::String("Mithun@2806".to_string()),
-    ]).expect("Login failed");
+    let login = rpc_call(
+        "auth.login",
+        &[
+            MsgValue::String("Mithun".to_string()),
+            MsgValue::String("Mithun@2806".to_string()),
+        ],
+    )
+    .expect("Login failed");
     let token = login.get("token").and_then(|v| v.as_str()).unwrap_or("");
 
     // Get workspaces
-    let ws = rpc_call("db.workspaces", &[
-        MsgValue::String(token.to_string()),
-    ]).expect("Workspaces call failed");
+    let ws = rpc_call("db.workspaces", &[MsgValue::String(token.to_string())])
+        .expect("Workspaces call failed");
 
     let workspaces = ws.get("workspaces").and_then(|v| v.as_array());
     assert!(workspaces.is_some(), "Should have workspaces array");
@@ -187,20 +217,28 @@ fn test_msfrpc_hosts_integration() {
     }
 
     // Login first
-    let login = rpc_call("auth.login", &[
-        MsgValue::String("Mithun".to_string()),
-        MsgValue::String("Mithun@2806".to_string()),
-    ]).expect("Login failed");
+    let login = rpc_call(
+        "auth.login",
+        &[
+            MsgValue::String("Mithun".to_string()),
+            MsgValue::String("Mithun@2806".to_string()),
+        ],
+    )
+    .expect("Login failed");
     let token = login.get("token").and_then(|v| v.as_str()).unwrap_or("");
 
     // Get hosts with workspace parameter
     let mut opts = BTreeMap::new();
-    opts.insert("workspace".to_string(), MsgValue::String("default".to_string()));
+    opts.insert(
+        "workspace".to_string(),
+        MsgValue::String("default".to_string()),
+    );
 
-    let hosts = rpc_call("db.hosts", &[
-        MsgValue::String(token.to_string()),
-        MsgValue::Map(opts),
-    ]).expect("Hosts call failed");
+    let hosts = rpc_call(
+        "db.hosts",
+        &[MsgValue::String(token.to_string()), MsgValue::Map(opts)],
+    )
+    .expect("Hosts call failed");
 
     let hosts_arr = hosts.get("hosts").and_then(|v| v.as_array());
     assert!(hosts_arr.is_some(), "Should have hosts array");
@@ -214,13 +252,21 @@ fn test_msfrpc_login_wrong_password() {
         return;
     }
 
-    let result = rpc_call("auth.login", &[
-        MsgValue::String("Mithun".to_string()),
-        MsgValue::String("wrong_password".to_string()),
-    ]).expect("RPC call should return");
+    let result = rpc_call(
+        "auth.login",
+        &[
+            MsgValue::String("Mithun".to_string()),
+            MsgValue::String("wrong_password".to_string()),
+        ],
+    )
+    .expect("RPC call should return");
 
     let has_error = result.get("error").and_then(|v| {
-        if let MsgValue::Bool(b) = v { Some(*b) } else { None }
+        if let MsgValue::Bool(b) = v {
+            Some(*b)
+        } else {
+            None
+        }
     }) == Some(true);
     assert!(has_error, "Should return error for wrong password");
 }
@@ -233,18 +279,20 @@ fn test_msfrpc_auth_logout_integration() {
     }
 
     // Login first
-    let login = rpc_call("auth.login", &[
-        MsgValue::String("Mithun".to_string()),
-        MsgValue::String("Mithun@2806".to_string()),
-    ]).expect("Login failed");
+    let login = rpc_call(
+        "auth.login",
+        &[
+            MsgValue::String("Mithun".to_string()),
+            MsgValue::String("Mithun@2806".to_string()),
+        ],
+    )
+    .expect("Login failed");
     let token = login.get("token").and_then(|v| v.as_str()).unwrap_or("");
 
     // Logout - note: in this MSF version, the authenticator extracts the token
     // from args, so rpc_logout may receive 0 args. This test documents the
     // current behavior.
-    let logout = rpc_call("auth.logout", &[
-        MsgValue::String(token.to_string()),
-    ]);
+    let logout = rpc_call("auth.logout", &[MsgValue::String(token.to_string())]);
     match logout {
         Ok(val) => {
             let result = val.get("result").and_then(|v| v.as_str());

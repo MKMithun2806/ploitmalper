@@ -1,4 +1,4 @@
-# 🛡️ PloitMalper
+# PloitMalper
 
 [![Crates.io](https://img.shields.io/crates/v/ploit-malper.svg)](https://crates.io/crates/ploit-malper)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

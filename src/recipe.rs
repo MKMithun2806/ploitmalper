@@ -49,9 +49,7 @@ pub fn build_recipe(
                 .map(|(_, payload)| (*payload).to_string())
         })
         // Fallback for known platforms: use the first available payload
-        .unwrap_or_else(|| {
-            platform_fallback_payload(&platform_lower, &arch_lower)
-        });
+        .unwrap_or_else(|| platform_fallback_payload(&platform_lower, &arch_lower));
 
     let format = match platform_lower.as_str() {
         "windows" => "exe",
