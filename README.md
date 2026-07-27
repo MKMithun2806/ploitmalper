@@ -28,7 +28,7 @@ PloitMalper leverages system utilities for lightweight HTTP transport:
 
 - **Rust 1.70+**
 - **curl**: Used for NVD API and MSF-RPC communication.
-- **Metasploit Framework** (Optional, for MSF-RPC integration).
+- **Metasploit Framework** (Recommended, for MSF-RPC integration).
 
 ---
 
@@ -38,7 +38,6 @@ PloitMalper leverages system utilities for lightweight HTTP transport:
 
 Download the latest release archive for your platform from the [Releases page](https://github.com/MKMithun2806/ploitmalper/releases). Each archive contains a single statically-linked binary.
 
-Releases are built manually via the [Release workflow](https://github.com/MKMithun2806/ploitmalper/actions/workflows/release.yml) — trigger it with the desired version tag (e.g., `v0.1.1`) to produce binaries for all targets.
 
 ### Using Cargo (Recommended)
 
@@ -96,20 +95,3 @@ Configuration and caches are stored in:
 - **Linux/macOS**: `~/.config/ploit_malper/`
 - **Windows**: `%USERPROFILE%\.config\ploit_malper\`
 
----
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## 📜 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
