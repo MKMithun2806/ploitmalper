@@ -4,39 +4,44 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g., v0.1.0)'
+        description: "Release version (e.g. v0.1.0)"
         required: true
         type: string
 
 env:
   CARGO_TERM_COLOR: always
+  BINARY_NAME: ploit-malper
+
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
+
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            ext: ""
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
+            ext: ""
+
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
-            ext: ""
             archive: tar.gz
-          - target: x86_64-apple-darwin
-            os: macos-latest
             ext: ""
-            archive: tar.gz
+
           - target: aarch64-apple-darwin
             os: macos-latest
-            ext: ""
             archive: tar.gz
+            ext: ""
+
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            ext: ".exe"
             archive: zip
+            ext: ".exe"
 
     runs-on: ${{ matrix.os }}
 
@@ -47,65 +52,87 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross
+        if: runner.os == 'Linux'
+        run: cargo install cross --locked
 
-      - name: Prepare archive
+      - name: Build
         shell: bash
         run: |
-          BINARY="target/${{ matrix.target }}/release/ploit-malper${{ matrix.ext }}"
-          ARCHIVE_NAME="ploit-malper-${{ inputs.version }}-${{ matrix.target }}.${{ matrix.archive }}"
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "$ARCHIVE_NAME" "$BINARY"
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cross build --release --target ${{ matrix.target }}
           else
-            tar czf "$ARCHIVE_NAME" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
+            cargo build --release --target ${{ matrix.target }}
           fi
-          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> $GITHUB_ENV
 
-      - name: Upload archive
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARCHIVE_NAME }}
-          path: ${{ env.ARCHIVE_NAME }}
-
-  checksums:
-    name: Generate checksums
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Generate SHA256SUMS
+      - name: Package
+        shell: bash
         run: |
-          cd artifacts
-          find . -type f -exec sha256sum {} \; | sed 's|./||' > ../SHA256SUMS.txt
+          BIN="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.ext }}"
+          NAME="${{ env.BINARY_NAME }}-${{ inputs.version }}-${{ matrix.target }}"
+
+          if [ ! -f "$BIN" ]; then
+            echo "Binary not found!"
+            ls -R target
+            exit 1
+          fi
+
+          mkdir package
+          cp "$BIN" package/
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            cd package
+            7z a "../${NAME}.zip" *
+            cd ..
+            echo "ARCHIVE=${NAME}.zip" >> $GITHUB_ENV
+          else
+            tar -czf "${NAME}.tar.gz" -C package .
+            echo "ARCHIVE=${NAME}.tar.gz" >> $GITHUB_ENV
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SHA256SUMS.txt
-          path: SHA256SUMS.txt
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
 
-  github_release:
-    name: Create GitHub Release
-    needs: [build, checksums]
+  checksums:
+    name: SHA256 Checksums
+    needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
 
+    steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create Release
+      - name: Generate checksums
+        run: |
+          find artifacts -type f -exec sha256sum {} \; | \
+          sed 's|artifacts/||' > SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SHA256SUMS
+          path: SHA256SUMS.txt
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - build
+      - checksums
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ inputs.version }}" \
             --title "${{ inputs.version }}" \
-            --notes "See [CHANGELOG](CHANGELOG.md) for details." \
-            --draft \
+            --generate-notes \
             artifacts/**/*
