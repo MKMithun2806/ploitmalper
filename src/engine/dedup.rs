@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
+use crate::analyze::extract_endpoint;
 use crate::models::{DedupResult, ScanRecord};
 
 fn normalize_title(title: &str) -> String {
@@ -27,12 +28,19 @@ fn composite_key(record: &ScanRecord) -> String {
 
 pub fn deduplicate_records(records: Vec<ScanRecord>) -> DedupResult {
     let total_count = records.len();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
     let mut unique_records = Vec::new();
 
     for record in records {
         let key = composite_key(&record);
-        if seen.insert(key) {
+        if let Some(&existing_idx) = seen.get(&key) {
+            merge_record(&mut unique_records[existing_idx], &record);
+        } else {
+            let mut record = record;
+            if record.affected_endpoints.is_empty() {
+                record.affected_endpoints = extract_endpoint(&record).into_iter().collect();
+            }
+            seen.insert(key, unique_records.len());
             unique_records.push(record);
         }
     }
@@ -44,6 +52,25 @@ pub fn deduplicate_records(records: Vec<ScanRecord>) -> DedupResult {
         unique_count,
         removed_count,
         records: unique_records,
+    }
+}
+
+/// Merge location and CVE information from a duplicate into the kept record
+/// so the same vulnerability reported at multiple endpoints is preserved.
+fn merge_record(kept: &mut ScanRecord, duplicate: &ScanRecord) {
+    if let Some(endpoint) = extract_endpoint(duplicate) {
+        if !kept.affected_endpoints.contains(&endpoint) {
+            kept.affected_endpoints.push(endpoint);
+        }
+    }
+    if kept.cve.is_none() {
+        kept.cve = duplicate.cve.clone();
+    }
+    if kept.service.is_none() {
+        kept.service = duplicate.service.clone();
+    }
+    if kept.port.is_none() {
+        kept.port = duplicate.port;
     }
 }
 

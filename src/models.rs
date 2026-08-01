@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,6 +13,8 @@ pub struct ScanRecord {
     pub cve: Option<String>,
     pub service: Option<String>,
     pub raw: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_endpoints: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nvd_description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,4 +116,61 @@ pub struct MSFHostsResult {
 pub struct MSFHostCheckResult {
     pub exists: bool,
     pub error: String,
+}
+
+/// A vulnerability grouped across multiple affected endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FindingGroup {
+    pub title: String,
+    pub severity: String,
+    pub count: usize,
+    pub target: String,
+    pub affected_endpoints: Vec<String>,
+    pub cves: Vec<String>,
+    pub ports: Vec<String>,
+    pub tools: Vec<String>,
+}
+
+/// High-level executive summary of a scan.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ScanSummary {
+    pub host: String,
+    pub server: Option<String>,
+    pub framework: Option<String>,
+    pub severity_counts: BTreeMap<String, usize>,
+    pub top_risks: Vec<String>,
+}
+
+/// Weighted overall risk score with a rendered bar and justification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskScore {
+    pub score: u32,
+    pub bar: String,
+    pub reasons: Vec<String>,
+}
+
+/// Metasploit suggestions grouped by purpose.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModuleCategories {
+    pub enumeration: Vec<ModuleSuggestion>,
+    pub validation: Vec<ModuleSuggestion>,
+    pub exploitation: Vec<ModuleSuggestion>,
+    pub manual_notes: Vec<String>,
+}
+
+/// A single MITRE ATT&CK tactic with matching techniques and evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MitreTactic {
+    pub tactic: String,
+    pub techniques: Vec<String>,
+    pub findings: Vec<String>,
+}
+
+/// Additional CVE intelligence beyond raw NVD data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CVEExtraInfo {
+    pub epss: Option<f32>,
+    pub in_kev: bool,
+    pub public_exploit: bool,
+    pub metasploit_modules: Vec<String>,
 }

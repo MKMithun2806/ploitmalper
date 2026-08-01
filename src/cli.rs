@@ -142,12 +142,9 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
         println!();
     }
 
-    println!("{}", report::render_findings_table(&records));
-
     let mut all_suggestions = Vec::<ModuleSuggestion>::new();
     let mut seen_suggestions = HashSet::<(String, String)>::new();
 
-    println!();
     println!("[+] Analyzing service banners and titles for module suggestions...");
     for record in &records {
         if let Some(service) = record.service.as_deref() {
@@ -164,9 +161,14 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
 
     if all_suggestions.is_empty() {
         println!("[?] No module suggestions for detected services.");
-    } else {
-        println!("{}", report::render_module_table(&all_suggestions));
     }
+
+    println!();
+    println!(
+        "{}",
+        report::render_console_report(&records, &all_suggestions, &[])
+    );
+    println!();
 
     let mut msf_connected = false;
     let mut msf_client = None;
