@@ -127,6 +127,7 @@ impl NVDClient {
             "cvss_v2_score": info.cvss_v2_score,
             "published": info.published,
             "last_modified": info.last_modified,
+            "weaknesses": info.weaknesses,
             "references": info.references,
         });
 
@@ -168,6 +169,16 @@ impl NVDClient {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            weaknesses: cached
+                .get("weaknesses")
+                .and_then(Value::as_array)
+                .map(|refs| {
+                    refs.iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             references: cached
                 .get("references")
                 .and_then(Value::as_array)
@@ -260,6 +271,26 @@ impl NVDClient {
             })
             .unwrap_or_default();
 
+        let weaknesses = cve_data
+            .get("weaknesses")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                let mut out = Vec::new();
+                for entry in entries {
+                    if let Some(descs) = entry.get("description").and_then(Value::as_array) {
+                        for desc in descs {
+                            if let Some(value) = desc.get("value").and_then(Value::as_str) {
+                                if !out.contains(&value.to_string()) {
+                                    out.push(value.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+
         NVDCVEInfo {
             cve_id: cve_id.to_string(),
             description,
@@ -276,6 +307,7 @@ impl NVDClient {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            weaknesses,
             references,
         }
     }
@@ -284,23 +316,27 @@ impl NVDClient {
         let mut stats = EnrichmentStats::default();
 
         for record in records {
-            let cve = match record.cve.clone() {
-                Some(cve) => cve,
-                None => continue,
+            let cves = if record.cves.is_empty() {
+                record.cve.clone().into_iter().collect::<Vec<_>>()
+            } else {
+                record.cves.clone()
             };
 
-            if let Some(cached) = self.get_cached(&cve).cloned() {
-                stats.cache_hits += 1;
-                let info = Self::info_from_cached(&cve, &cached);
-                apply_nvd(record, &info);
-                continue;
-            }
+            for cve in cves {
+                let key = cve.trim().to_uppercase();
+                if let Some(cached) = self.get_cached(&key).cloned() {
+                    stats.cache_hits += 1;
+                    let info = Self::info_from_cached(&key, &cached);
+                    apply_nvd(record, &info);
+                    continue;
+                }
 
-            if let Some(info) = self.lookup_cve(&cve) {
-                stats.fetched += 1;
-                apply_nvd(record, &info);
-            } else {
-                stats.not_found += 1;
+                if let Some(info) = self.lookup_cve(&key) {
+                    stats.fetched += 1;
+                    apply_nvd(record, &info);
+                } else {
+                    stats.not_found += 1;
+                }
             }
         }
 
@@ -315,9 +351,129 @@ fn apply_nvd(record: &mut ScanRecord, info: &NVDCVEInfo) {
     record.nvd_cvss_v2 = info.cvss_v2_score;
     record.nvd_published = Some(info.published.clone());
     record.nvd_last_modified = Some(info.last_modified.clone());
+    record.nvd_weaknesses = info.weaknesses.clone();
     record.nvd_references = info.references.clone();
 
     if let Some(severity) = &info.cvss_v3_severity {
         record.severity = severity.to_lowercase();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_cwe_weaknesses_from_nvd_response() {
+        let cve_data = json!({
+            "descriptions": [{"lang": "en", "value": "Path traversal in Apache."}],
+            "metrics": {
+                "cvssMetricV31": [{
+                    "cvssData": {
+                        "baseScore": 9.8,
+                        "baseSeverity": "CRITICAL"
+                    }
+                }]
+            },
+            "weaknesses": [{
+                "description": [{"lang": "en", "value": "CWE-22"}, {"lang": "en", "value": "CWE-200"}]
+            }],
+            "published": "2021-10-05T00:00:00.000",
+            "lastModified": "2021-10-08T00:00:00.000",
+            "references": [{"url": "https://example.com/advisory"}]
+        });
+        let info = NVDClient::info_from_cve("CVE-2021-41773", cve_data.as_object().unwrap());
+        assert_eq!(
+            info.weaknesses,
+            vec!["CWE-22".to_string(), "CWE-200".to_string()]
+        );
+        assert_eq!(info.cvss_v3_score, Some(9.8));
+        assert_eq!(info.cvss_v3_severity.as_deref(), Some("CRITICAL"));
+        assert_eq!(info.published, "2021-10-05T00:00:00.000");
+        assert_eq!(
+            info.references,
+            vec!["https://example.com/advisory".to_string()]
+        );
+    }
+
+    #[test]
+    fn enriches_every_discovered_cve_from_cache() {
+        let mut client = NVDClient {
+            api_key: String::new(),
+            cache: HashMap::new(),
+        };
+        client.cache.insert(
+            "CVE-2003-1418".into(),
+            json!({
+                "cve_id": "CVE-2003-1418",
+                "description": "Inode leak",
+                "cvss_v3_score": null,
+                "cvss_v3_severity": null,
+                "cvss_v2_score": 5.0,
+                "published": "2003-08-11T00:00:00.000",
+                "last_modified": "2017-10-11T00:00:00.000",
+                "weaknesses": ["CWE-200"],
+                "references": []
+            }),
+        );
+        client.cache.insert(
+            "CVE-2021-41773".into(),
+            json!({
+                "cve_id": "CVE-2021-41773",
+                "description": "Path traversal",
+                "cvss_v3_score": 9.8,
+                "cvss_v3_severity": "CRITICAL",
+                "cvss_v2_score": null,
+                "published": "2021-10-05T00:00:00.000",
+                "last_modified": "2021-10-08T00:00:00.000",
+                "weaknesses": ["CWE-22"],
+                "references": ["https://example.com"]
+            }),
+        );
+
+        let mut records = vec![ScanRecord {
+            cves: vec!["CVE-2003-1418".to_string(), "CVE-2021-41773".to_string()],
+            ..Default::default()
+        }];
+        let stats = client.enrich_records(&mut records);
+        assert_eq!(stats.cache_hits, 2);
+        assert_eq!(stats.fetched, 0);
+        assert_eq!(stats.not_found, 0);
+        assert_eq!(records[0].nvd_cvss_v3, Some(9.8));
+        assert_eq!(records[0].severity, "critical");
+        assert_eq!(records[0].nvd_weaknesses, vec!["CWE-22".to_string()]);
+    }
+
+    #[test]
+    fn gracefully_handles_missing_cve() {
+        // A CVE not in cache would hit the network; ensure the cache-hit path
+        // with a fully populated entry never panics and applies fields.
+        let mut client = NVDClient {
+            api_key: String::new(),
+            cache: HashMap::new(),
+        };
+        client.cache.insert(
+            "CVE-2021-44228".into(),
+            json!({
+                "cve_id": "CVE-2021-44228",
+                "description": "Log4j JNDI injection",
+                "cvss_v3_score": 10.0,
+                "cvss_v3_severity": "CRITICAL",
+                "cvss_v2_score": null,
+                "published": "2021-12-09T00:00:00.000",
+                "last_modified": "2021-12-10T00:00:00.000",
+                "weaknesses": ["CWE-502"],
+                "references": []
+            }),
+        );
+        let mut records = vec![ScanRecord {
+            cves: vec!["CVE-2021-44228".to_string()],
+            ..Default::default()
+        }];
+        let stats = client.enrich_records(&mut records);
+        assert_eq!(stats.cache_hits, 1);
+        assert_eq!(records[0].nvd_cvss_v3, Some(10.0));
+        assert_eq!(records[0].nvd_cvss_v3_severity.as_deref(), Some("CRITICAL"));
     }
 }

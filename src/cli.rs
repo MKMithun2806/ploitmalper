@@ -138,19 +138,42 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
     let raw_json = std::fs::read_to_string(&input_path)?;
 
     println!("[+] Parsing with Rust engine...");
-    let parsed = parser::parse_vulnmalper_json(&raw_json)?;
-    println!("[+] Found {} raw findings. Deduplicating...", parsed.len());
+    let mut parsed = parser::parse_vulnmalper_scan(&raw_json)?;
+    let injectable = parsed.injectable_endpoints.clone();
+    let raw_count = parsed.records.len();
 
-    let dedup_result = dedup::deduplicate_records(parsed);
+    println!(
+        "[+] Found {} raw findings ({} injectable endpoint{} flagged). Normalizing...",
+        raw_count,
+        injectable.len(),
+        if injectable.len() == 1 { "" } else { "s" }
+    );
+
+    // Extract CVEs from every field before deduplication.
+    for record in &mut parsed.records {
+        crate::cve::extract_into_record(record);
+    }
+    let discovered_cves: std::collections::BTreeSet<String> = parsed
+        .records
+        .iter()
+        .flat_map(|record| record.cves.iter().cloned())
+        .collect();
+    println!(
+        "[+] Discovered {} CVE id{}.",
+        discovered_cves.len(),
+        if discovered_cves.len() == 1 { "" } else { "s" }
+    );
+
+    let dedup_result = dedup::deduplicate_records(parsed.records);
     let mut records = dedup_result.records;
     let dedup_stats = DedupStats {
-        total: records.len() + dedup_result.removed_count,
+        total: raw_count,
         unique: dedup_result.unique_count,
         removed: dedup_result.removed_count,
     };
 
     println!(
-        "[+] Deduplication complete: {} unique, {} removed",
+        "[+] Normalization + deduplication complete: {} unique, {} merged",
         dedup_stats.unique, dedup_stats.removed
     );
     println!();
@@ -158,7 +181,7 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
     if config_mgr.is_nvd_configured() {
         let nvd_cfg = config_mgr.get_nvd_config().clone();
         let mut nvd_client = NVDClient::new(&nvd_cfg.api_key);
-        println!("[+] Enriching CVEs via NVD API...");
+        println!("[+] Enriching discovered CVEs via NVD API...");
         let stats: EnrichmentStats = nvd_client.enrich_records(&mut records);
         println!(
             "[+] NVD enrichment complete: {} fetched, {} from cache, {} not found",
@@ -170,7 +193,7 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
     let mut all_suggestions = Vec::<ModuleSuggestion>::new();
     let mut seen_suggestions = HashSet::<(String, String)>::new();
 
-    println!("[+] Analyzing service banners and titles for module suggestions...");
+    println!("[+] Analyzing service banners, technologies and CVEs for module suggestions...");
     for record in &records {
         if let Some(service) = record.service.as_deref() {
             for suggestion in matcher::suggest_modules(service) {
@@ -178,20 +201,34 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
             }
         }
         if !record.title.is_empty() {
-            for suggestion in matcher::suggest_from_title(&record.title, "") {
+            for suggestion in matcher::suggest_from_title(&record.title, &record.detail) {
+                push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
+            }
+        }
+        for cve in &record.cves {
+            for module in crate::msf::modules_for_cve(cve) {
+                let suggestion = ModuleSuggestion {
+                    service_banner: format!("cve:{}", cve),
+                    suggested_module: module.name.clone(),
+                    confidence: if module.rank == "excellent" || module.rank == "great" {
+                        "high".to_string()
+                    } else {
+                        "medium".to_string()
+                    },
+                };
                 push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
             }
         }
     }
 
     if all_suggestions.is_empty() {
-        println!("[?] No module suggestions for detected services.");
+        println!("[?] No module suggestions for detected services or CVEs.");
     }
 
     println!();
     println!(
         "{}",
-        report::render_console_report(&records, &all_suggestions, &[])
+        report::render_console_report(&records, &injectable, &all_suggestions, &[], &dedup_stats)
     );
     println!();
 
@@ -289,6 +326,7 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
     if prompt_bool_with_default("\nWrite findings to Markdown report (report.md)?", true)? {
         let output_path = report::generate_markdown_report(
             &records,
+            &injectable,
             &all_suggestions,
             &recipes,
             &dedup_stats,
