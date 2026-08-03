@@ -17,6 +17,8 @@ const REQUEST_TIMEOUT_S: u64 = 60;
 pub struct PocketBaseStorage {
     config: DatabaseConfig,
     token: String,
+    /// True once the current token has been verified against the API.
+    token_validated: bool,
 }
 
 struct HttpResponse {
@@ -371,6 +373,7 @@ impl PocketBaseStorage {
                 ..config.clone()
             },
             token: config.pocketbase_token.clone(),
+            token_validated: false,
         })
     }
 
@@ -416,13 +419,24 @@ impl PocketBaseStorage {
         }
         self.token = token.clone();
         self.config.pocketbase_token = token.clone();
+        self.token_validated = true;
         Ok(token)
     }
 
-    /// Ensure we have a usable token, minting one from credentials if needed.
+    /// Ensure we have a usable token, verifying a cached one once and minting
+    /// a fresh token from credentials if it has expired.
     fn ensure_token(&mut self) -> Result<String> {
-        if !self.token.is_empty() {
+        if self.token_validated && !self.token.is_empty() {
             return Ok(self.token.clone());
+        }
+        if !self.token.is_empty() {
+            let url = format!("{}/api/collections", self.base_url());
+            let resp = curl_request("GET", &url, Some(&self.token), None, &[("perPage", "1")])?;
+            if resp.status == 200 {
+                self.token_validated = true;
+                return Ok(self.token.clone());
+            }
+            self.token.clear();
         }
         self.login()
     }
@@ -464,7 +478,7 @@ impl PocketBaseStorage {
             &url,
             Some(&token),
             None,
-            &[("filter", &filter), ("perPage", "200")],
+            &[("filter", &filter), ("perPage", "500")],
         )?;
         if resp.status != 200 {
             return Err(AppError::Network(format!(
@@ -527,23 +541,38 @@ impl PocketBaseStorage {
     fn list_records(&mut self, collection: &str, filter: Option<&str>) -> Result<Vec<Value>> {
         let token = self.ensure_token()?;
         let url = format!("{}/api/collections/{}/records", self.base_url(), collection);
-        let mut query: Vec<(&str, &str)> = vec![("perPage", "200")];
-        if let Some(f) = filter {
-            query.push(("filter", f));
+        const PER_PAGE: u64 = 500;
+        let mut items: Vec<Value> = Vec::new();
+        let mut page: u64 = 1;
+        loop {
+            let page_str = page.to_string();
+            let per_str = PER_PAGE.to_string();
+            let mut query: Vec<(&str, &str)> =
+                vec![("page", page_str.as_str()), ("perPage", per_str.as_str())];
+            if let Some(f) = filter {
+                query.push(("filter", f));
+            }
+            let resp = curl_request("GET", &url, Some(&token), None, &query)?;
+            if resp.status != 200 {
+                return Err(AppError::Network(format!(
+                    "Failed to list records in '{}' (HTTP {}): {}",
+                    collection, resp.status, resp.body
+                )));
+            }
+            let batch = resp
+                .body
+                .get("items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let count = batch.len();
+            items.extend(batch);
+            if count < PER_PAGE as usize {
+                break;
+            }
+            page += 1;
         }
-        let resp = curl_request("GET", &url, Some(&token), None, &query)?;
-        if resp.status != 200 {
-            return Err(AppError::Network(format!(
-                "Failed to list records in '{}' (HTTP {}): {}",
-                collection, resp.status, resp.body
-            )));
-        }
-        Ok(resp
-            .body
-            .get("items")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default())
+        Ok(items)
     }
 
     /// Create a collection directly via the REST API (fallback when pbctl is

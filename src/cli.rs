@@ -51,6 +51,24 @@ pub fn run() -> Result<()> {
         "ingest" => {
             cmd_ingest(&args[1..], &mut config_mgr)?;
         }
+        "assets" => {
+            crate::frontend::assets::cmd_assets(&args[1..], &mut config_mgr)?;
+        }
+        "services" => {
+            crate::frontend::services::cmd_services(&args[1..], &mut config_mgr)?;
+        }
+        "findings" => {
+            crate::frontend::findings::cmd_findings(&args[1..], &mut config_mgr)?;
+        }
+        "history" => {
+            crate::frontend::history::cmd_history(&args[1..], &mut config_mgr)?;
+        }
+        "runs" => {
+            crate::frontend::runs::cmd_runs(&args[1..], &mut config_mgr)?;
+        }
+        "diff" => {
+            crate::frontend::diff::cmd_diff(&args[1..], &mut config_mgr)?;
+        }
         "-h" | "--help" => {
             print_banner();
         }
@@ -634,7 +652,15 @@ fn print_banner() {
     println!("  process <file>   Process and deduplicate scan results");
     println!("  db_setup         Configure the intelligence database (PocketBase/SQLite)");
     println!("  ingest <folder>  Import Malper scan artifacts into the database");
+    println!("  assets           List assets with lifecycle and service summary");
+    println!("  services         List discovered services across assets");
+    println!("  findings         List vulnerability findings");
+    println!("  history <id>     Show the observation timeline for an asset/service/finding");
+    println!("  runs             List all scan runs");
+    println!("  diff [a] [b]     Compare two scan runs (latest two by default)");
     println!("  share            Start temporary file server");
     println!("  setup            Configure MSF-RPC and NVD API credentials");
     println!("  reset-config     Reset stored configuration");
+    println!();
+    println!("Frontend commands accept --verbose, --json, and --backend pocketbase|sqlite.");
 }
