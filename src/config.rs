@@ -28,6 +28,14 @@ pub fn nvd_cache_file() -> PathBuf {
     config_dir().join("nvd_cache.json")
 }
 
+pub fn db_schema_file() -> PathBuf {
+    config_dir().join("schema.pbsl")
+}
+
+pub fn default_sqlite_db() -> PathBuf {
+    config_dir().join("ploit_malper.db")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MSFRPCConfig {
@@ -60,9 +68,44 @@ pub struct NVDConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct DatabaseConfig {
+    /// Which storage backend is active: "pocketbase" or "sqlite".
+    pub backend: String,
+    /// PocketBase instance URL (local or remote/shared).
+    pub pocketbase_url: String,
+    /// Auth token used to talk to the PocketBase API. May be empty if only
+    /// admin credentials are stored and a fresh token must be minted.
+    pub pocketbase_token: String,
+    /// Superuser / admin email for authenticating to PocketBase.
+    pub pocketbase_admin_email: String,
+    /// Superuser / admin password for authenticating to PocketBase.
+    pub pocketbase_admin_password: String,
+    /// Local SQLite database file path.
+    pub sqlite_path: String,
+    /// Whether a database has been configured through `db_setup`.
+    pub configured: bool,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            backend: "pocketbase".to_string(),
+            pocketbase_url: "http://127.0.0.1:8090".to_string(),
+            pocketbase_token: String::new(),
+            pocketbase_admin_email: String::new(),
+            pocketbase_admin_password: String::new(),
+            sqlite_path: default_sqlite_db().to_string_lossy().to_string(),
+            configured: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub msfrpc: MSFRPCConfig,
     pub nvd: NVDConfig,
+    pub database: DatabaseConfig,
     pub report_dir: String,
     pub last_scan_file: Option<String>,
 }
@@ -72,6 +115,7 @@ impl Default for AppConfig {
         Self {
             msfrpc: MSFRPCConfig::default(),
             nvd: NVDConfig::default(),
+            database: DatabaseConfig::default(),
             report_dir: home_dir()
                 .join("ploit_malper_reports")
                 .to_string_lossy()
@@ -154,6 +198,14 @@ impl ConfigManager {
 
     pub fn get_nvd_config(&self) -> &NVDConfig {
         &self.config.nvd
+    }
+
+    pub fn get_database_config(&self) -> &DatabaseConfig {
+        &self.config.database
+    }
+
+    pub fn database_configured(&self) -> bool {
+        self.config.database.configured
     }
 }
 

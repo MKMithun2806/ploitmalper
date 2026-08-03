@@ -1,0 +1,128 @@
+-- PloitMalper stateful intelligence schema.
+--
+-- Managed declaratively with pbctl (PocketBase Schema Language).
+-- https://github.com/MKMithun2806/pbctl
+--
+-- The database holds the current state of the Malper ecosystem plus full
+-- history. JSON scan artifacts remain immutable; this schema stores only the
+-- evolving intelligence derived from them.
+
+-- ---------------------------------------------------------------------------
+-- Assets: scannable targets (IP, hostname, domain) with lifecycle state.
+-- ---------------------------------------------------------------------------
+CREATE TABLE Assets (
+    stable_id   TEXT REQUIRED UNIQUE,
+    asset_type  SELECT('ip', 'hostname', 'domain', 'url'),
+    name        TEXT REQUIRED,
+    ip          TEXT,
+    fqdn        TEXT,
+    reverse_dns TEXT,
+    first_seen  TEXT,
+    last_seen   TEXT,
+    status      TEXT,
+    metadata    JSON
+);
+
+-- ---------------------------------------------------------------------------
+-- Services: open network services discovered on an asset.
+-- ---------------------------------------------------------------------------
+CREATE TABLE Services (
+    stable_id    TEXT REQUIRED UNIQUE,
+    asset_id     TEXT REQUIRED,
+    port         NUMBER,
+    protocol     TEXT,
+    service_name TEXT,
+    product      TEXT,
+    version      TEXT,
+    version_str  TEXT,
+    banner       TEXT,
+    technologies JSON,
+    cpes         JSON,
+    first_seen   TEXT,
+    last_seen    TEXT,
+    status       TEXT,
+    metadata     JSON
+);
+
+-- ---------------------------------------------------------------------------
+-- Findings: vulnerabilities / security findings on an asset.
+-- ---------------------------------------------------------------------------
+CREATE TABLE Findings (
+    stable_id      TEXT REQUIRED UNIQUE,
+    asset_id       TEXT REQUIRED,
+    service_id     TEXT,
+    title          TEXT REQUIRED,
+    severity       TEXT,
+    tool           TEXT,
+    target_url     TEXT,
+    detail         TEXT,
+    reference      TEXT,
+    cves           JSON,
+    endpoints      JSON,
+    technologies   JSON,
+    first_seen     TEXT,
+    last_seen      TEXT,
+    status         TEXT,
+    exploitability TEXT,
+    metadata       JSON
+);
+
+-- ---------------------------------------------------------------------------
+-- Observations: append-only history of how intelligence changed across runs.
+-- ---------------------------------------------------------------------------
+CREATE TABLE Observations (
+    stable_id    TEXT REQUIRED UNIQUE,
+    run_id       TEXT REQUIRED,
+    subject_type TEXT REQUIRED,
+    subject_id   TEXT REQUIRED,
+    kind         TEXT REQUIRED,
+    before       JSON,
+    after        JSON,
+    detail       TEXT,
+    observed_at  TEXT
+);
+
+-- ---------------------------------------------------------------------------
+-- Relationships: typed links between records (asset -> service -> finding).
+-- ---------------------------------------------------------------------------
+CREATE TABLE Relationships (
+    stable_id    TEXT REQUIRED UNIQUE,
+    run_id       TEXT,
+    subject_type TEXT REQUIRED,
+    subject_id   TEXT REQUIRED,
+    object_type  TEXT REQUIRED,
+    object_id    TEXT REQUIRED,
+    kind         TEXT REQUIRED,
+    detail       TEXT
+);
+
+-- ---------------------------------------------------------------------------
+-- ScanRuns: one logical scan over a target (may cover several artifacts).
+-- ---------------------------------------------------------------------------
+CREATE TABLE ScanRuns (
+    stable_id    TEXT REQUIRED UNIQUE,
+    target       TEXT REQUIRED,
+    folder       TEXT,
+    started_at   TEXT,
+    finished_at  TEXT,
+    tools        JSON,
+    artifacts    JSON,
+    content_hash TEXT,
+    imported_at  TEXT,
+    stats        JSON
+);
+
+-- ---------------------------------------------------------------------------
+-- Reports: stored scan / analysis reports associated with a run.
+-- ---------------------------------------------------------------------------
+CREATE TABLE Reports (
+    stable_id    TEXT REQUIRED UNIQUE,
+    run_id       TEXT REQUIRED,
+    tool         TEXT REQUIRED,
+    format       TEXT REQUIRED,
+    title        TEXT,
+    source_path  TEXT,
+    content      TEXT,
+    content_hash TEXT,
+    imported_at  TEXT
+);

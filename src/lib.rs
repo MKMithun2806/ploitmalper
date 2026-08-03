@@ -1,9 +1,11 @@
 pub mod analyze;
 pub mod cli;
 pub mod config;
+pub mod db;
 pub mod engine;
 pub mod enrich;
 pub mod error;
+pub mod ingest;
 pub mod models;
 pub mod msgpack;
 pub mod nvd;

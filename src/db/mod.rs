@@ -1,0 +1,130 @@
+pub mod models;
+pub mod pocketbase;
+pub mod schema;
+pub mod sqlite;
+
+use crate::config::DatabaseConfig;
+use crate::error::Result;
+use models::{Asset, Finding, Observation, Relationship, Report, ScanRun, Service};
+
+/// Collection names used by every backend.
+pub mod collections {
+    pub const ASSETS: &str = "Assets";
+    pub const SERVICES: &str = "Services";
+    pub const FINDINGS: &str = "Findings";
+    pub const OBSERVATIONS: &str = "Observations";
+    pub const RELATIONSHIPS: &str = "Relationships";
+    pub const SCAN_RUNS: &str = "ScanRuns";
+    pub const REPORTS: &str = "Reports";
+
+    pub const ALL: [&str; 7] = [
+        ASSETS,
+        SERVICES,
+        FINDINGS,
+        OBSERVATIONS,
+        RELATIONSHIPS,
+        SCAN_RUNS,
+        REPORTS,
+    ];
+}
+
+/// Backend-agnostic persistence interface used by the importer.
+///
+/// All write operations are upserts keyed by a stable, content-derived id so
+/// that re-running an import over the same scan folder is idempotent. History
+/// is preserved through the `Observations` collection rather than by
+/// overwriting prior rows.
+pub trait Storage: Send {
+    fn kind(&self) -> &str;
+
+    /// Verify connectivity (PocketBase health / SQLite open + query).
+    fn ping(&mut self) -> Result<bool>;
+
+    /// Create all required collections/tables if they do not exist.
+    fn ensure_schema(&mut self) -> Result<()>;
+
+    // --- Scan runs ------------------------------------------------------
+
+    fn upsert_scan_run(&mut self, run: &ScanRun) -> Result<()>;
+    fn get_scan_run(&mut self, run_id: &str) -> Result<Option<ScanRun>>;
+    fn list_scan_runs(&mut self) -> Result<Vec<ScanRun>>;
+
+    // --- Assets ---------------------------------------------------------
+
+    fn upsert_asset(&mut self, asset: &Asset) -> Result<()>;
+    fn get_asset(&mut self, asset_id: &str) -> Result<Option<Asset>>;
+    fn list_assets(&mut self) -> Result<Vec<Asset>>;
+
+    // --- Services -------------------------------------------------------
+
+    fn upsert_service(&mut self, service: &Service) -> Result<()>;
+    fn get_service(&mut self, service_id: &str) -> Result<Option<Service>>;
+    fn list_services_for_asset(&mut self, asset_id: &str) -> Result<Vec<Service>>;
+    fn list_all_services(&mut self) -> Result<Vec<Service>>;
+
+    // --- Findings -------------------------------------------------------
+
+    fn upsert_finding(&mut self, finding: &Finding) -> Result<()>;
+    fn get_finding(&mut self, finding_id: &str) -> Result<Option<Finding>>;
+    fn list_findings_for_asset(&mut self, asset_id: &str) -> Result<Vec<Finding>>;
+    fn list_all_findings(&mut self) -> Result<Vec<Finding>>;
+
+    // --- Observations ---------------------------------------------------
+
+    fn add_observation(&mut self, observation: &Observation) -> Result<()>;
+    fn get_observation(&mut self, obs_id: &str) -> Result<Option<Observation>>;
+    fn list_observations_for(
+        &mut self,
+        subject_type: &str,
+        subject_id: &str,
+    ) -> Result<Vec<Observation>>;
+    fn list_all_observations(&mut self) -> Result<Vec<Observation>>;
+
+    // --- Relationships --------------------------------------------------
+
+    fn upsert_relationship(&mut self, relationship: &Relationship) -> Result<()>;
+    fn get_relationship(&mut self, rel_id: &str) -> Result<Option<Relationship>>;
+    fn list_relationships_for(
+        &mut self,
+        subject_type: &str,
+        subject_id: &str,
+    ) -> Result<Vec<Relationship>>;
+
+    // --- Reports --------------------------------------------------------
+
+    fn upsert_report(&mut self, report: &Report) -> Result<()>;
+    fn get_report(&mut self, report_id: &str) -> Result<Option<Report>>;
+    fn list_reports_for_run(&mut self, run_id: &str) -> Result<Vec<Report>>;
+}
+
+/// Open a storage backend based on the persisted configuration.
+pub fn open_storage(config: &DatabaseConfig) -> Result<Box<dyn Storage>> {
+    if config.backend == "sqlite" {
+        Ok(Box::new(sqlite::SqliteStorage::open(&config.sqlite_path)?))
+    } else {
+        Ok(Box::new(pocketbase::PocketBaseStorage::new(config)?))
+    }
+}
+
+/// Open a storage backend, overriding the configured backend.
+pub fn open_storage_with(
+    config: &DatabaseConfig,
+    backend: &str,
+    pocketbase_url: Option<&str>,
+    sqlite_path: Option<&str>,
+) -> Result<Box<dyn Storage>> {
+    if backend == "sqlite" {
+        let path = sqlite_path
+            .map(str::to_string)
+            .unwrap_or_else(|| config.sqlite_path.clone());
+        Ok(Box::new(sqlite::SqliteStorage::open(&path)?))
+    } else {
+        let mut override_config = config.clone();
+        if let Some(url) = pocketbase_url {
+            override_config.pocketbase_url = url.to_string();
+        }
+        Ok(Box::new(pocketbase::PocketBaseStorage::new(
+            &override_config,
+        )?))
+    }
+}

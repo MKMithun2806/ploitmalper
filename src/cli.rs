@@ -44,6 +44,12 @@ pub fn run() -> Result<()> {
         "setup" => {
             cmd_setup(&mut config_mgr)?;
         }
+        "db_setup" => {
+            cmd_db_setup(&mut config_mgr)?;
+        }
+        "ingest" => {
+            cmd_ingest(&args[1..], &mut config_mgr)?;
+        }
         "-h" | "--help" => {
             print_banner();
         }
@@ -335,6 +341,198 @@ fn cmd_reset_config(config_mgr: &mut ConfigManager) -> Result<()> {
     Ok(())
 }
 
+fn cmd_db_setup(config_mgr: &mut ConfigManager) -> Result<()> {
+    let verbose = std::env::args().any(|a| a == "--verbose" || a == "-v");
+
+    println!("PloitMalper Database Setup");
+    println!();
+    println!("The intelligence database stores scan artifacts (NetMalper, VulnMalper,");
+    println!("PloitMalper) with history tracking. PocketBase is the primary backend with");
+    println!("SQLite as the local fallback.");
+    println!();
+
+    let current = config_mgr.get_database_config().clone();
+    let backend_choices = vec!["pocketbase".to_string(), "sqlite".to_string()];
+    let backend = prompt_choice("Backend", &backend_choices, &current.backend)?;
+
+    let mut db = current.clone();
+    db.backend = backend;
+
+    if db.backend == "pocketbase" {
+        println!();
+        println!("--- PocketBase Configuration ---");
+        db.pocketbase_url = prompt_text("PocketBase URL", &db.pocketbase_url)?;
+        db.pocketbase_admin_email = prompt_text("Admin email", &db.pocketbase_admin_email)?;
+        db.pocketbase_admin_password =
+            prompt_text("Admin password", &db.pocketbase_admin_password)?;
+
+        println!();
+        println!("[+] Preparing schema file...");
+        crate::db::schema::write_schema_file()?;
+        println!(
+            "[+] Schema written to {}",
+            crate::config::db_schema_file().display()
+        );
+
+        if !crate::db::schema::pbctl_available() {
+            println!("[!] pbctl not found on PATH; falling back to direct PocketBase API.");
+        } else {
+            println!();
+            println!("--- Schema plan (pbctl plan) ---");
+            let plan = crate::db::schema::pbctl_plan(&db, verbose)?;
+            print!("{}", plan.combined());
+            if !plan.success() {
+                return Err(AppError::Message(format!(
+                    "pbctl plan failed (exit {})",
+                    plan.exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "?".to_string())
+                )));
+            }
+        }
+
+        if prompt_bool_with_default("Apply schema to PocketBase?", true)? {
+            if crate::db::schema::pbctl_available() {
+                println!("[+] Applying schema via pbctl...");
+                let out = crate::db::schema::pbctl_apply(&db, verbose)?;
+                print!("{}", out.combined());
+                if !out.success() {
+                    return Err(AppError::Message(format!(
+                        "pbctl apply failed (exit {})",
+                        out.exit_code
+                            .map(|c| c.to_string())
+                            .unwrap_or_else(|| "?".to_string())
+                    )));
+                }
+            } else {
+                println!("[+] Creating collections via PocketBase API...");
+                let mut storage = crate::db::open_storage(&db)?;
+                if !storage.ping()? {
+                    return Err(AppError::Message(
+                        "PocketBase is not reachable at the configured URL".to_string(),
+                    ));
+                }
+                storage.ensure_schema()?;
+            }
+        } else {
+            println!("[!] Schema not applied. Configuration saved for later use.");
+        }
+    } else {
+        println!();
+        println!("--- SQLite Configuration ---");
+        db.sqlite_path = prompt_text("SQLite database path", &db.sqlite_path)?;
+        println!("[+] Initializing SQLite database...");
+        let mut storage = crate::db::open_storage(&db)?;
+        storage.ensure_schema()?;
+        if !storage.ping()? {
+            return Err(AppError::Message(
+                "SQLite database could not be opened".to_string(),
+            ));
+        }
+        println!("[+] SQLite database ready.");
+    }
+
+    db.configured = true;
+    config_mgr.config.database = db;
+    config_mgr.save()?;
+    println!();
+    println!(
+        "[+] Database configuration saved to {}",
+        crate::config::config_file().display()
+    );
+    Ok(())
+}
+
+fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
+    let mut folder: Option<PathBuf> = None;
+    let mut opts = crate::ingest::importer::IngestOptions::default();
+
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--verbose" | "-v" => opts.verbose = true,
+            "--dry-run" => opts.dry_run = true,
+            "--force" | "-f" => opts.force = true,
+            "--backend" | "-b" => {
+                if let Some(value) = args.get(index + 1) {
+                    if !["pocketbase", "sqlite", "auto"].contains(&value.as_str()) {
+                        return Err(AppError::Message(format!(
+                            "invalid backend '{}' (use pocketbase, sqlite or auto)",
+                            value
+                        )));
+                    }
+                    opts.backend = value.clone();
+                    index += 1;
+                }
+            }
+            "--pocketbase-url" => {
+                if let Some(value) = args.get(index + 1) {
+                    opts.pocketbase_url = Some(value.clone());
+                    index += 1;
+                }
+            }
+            "--sqlite-path" => {
+                if let Some(value) = args.get(index + 1) {
+                    opts.sqlite_path = Some(value.clone());
+                    index += 1;
+                }
+            }
+            "-h" | "--help" => {
+                println!(
+                    "Usage: ploit-malper ingest <folder> [--verbose] [--dry-run] [--force] \
+                     [--backend pocketbase|sqlite|auto] [--pocketbase-url URL] [--sqlite-path PATH]"
+                );
+                return Ok(());
+            }
+            other if folder.is_none() && !other.starts_with('-') => {
+                folder = Some(PathBuf::from(other));
+            }
+            other => {
+                return Err(AppError::Message(format!(
+                    "unknown ingest option: {}",
+                    other
+                )));
+            }
+        }
+        index += 1;
+    }
+
+    let folder = folder.ok_or_else(|| {
+        AppError::Message(
+            "ingest requires a folder path (e.g. ploit-malper ingest ./results)".to_string(),
+        )
+    })?;
+
+    if !config_mgr.database_configured() {
+        return Err(AppError::Message(
+            "no database configured; run 'ploit-malper db_setup' first".to_string(),
+        ));
+    }
+
+    let summary =
+        crate::ingest::importer::ingest_folder(&folder, config_mgr.get_database_config(), &opts)?;
+
+    if opts.dry_run || summary.skipped_already_imported {
+        return Ok(());
+    }
+
+    println!();
+    println!("[+] Import summary:");
+    println!("    run_id:        {}", summary.run_id);
+    println!("    target:        {}", summary.target);
+    println!(
+        "    artifacts:     {} accepted, {} rejected",
+        summary.artifacts_accepted, summary.artifacts_rejected
+    );
+    println!("    assets:        {}", summary.assets);
+    println!("    services:      {}", summary.services);
+    println!("    findings:      {}", summary.findings);
+    println!("    relationships: {}", summary.relationships);
+    println!("    reports:       {}", summary.reports);
+    println!("    observations:  {}", summary.observations);
+    Ok(())
+}
+
 fn push_unique_suggestion(
     suggestions: &mut Vec<ModuleSuggestion>,
     seen: &mut HashSet<(String, String)>,
@@ -439,6 +637,8 @@ fn print_banner() {
     println!();
     println!("Commands:");
     println!("  process <file>   Process and deduplicate scan results");
+    println!("  db_setup         Configure the intelligence database (PocketBase/SQLite)");
+    println!("  ingest <folder>  Import Malper scan artifacts into the database");
     println!("  share            Start temporary file server");
     println!("  setup            Configure MSF-RPC and NVD API credentials");
     println!("  reset-config     Reset stored configuration");

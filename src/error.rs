@@ -16,6 +16,14 @@ pub enum AppError {
     Msgpack(String),
     #[error("invalid data: {0}")]
     InvalidData(String),
+    #[error("SQLite error: {0}")]
+    Sqlite(String),
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(err: rusqlite::Error) -> Self {
+        AppError::Sqlite(err.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
