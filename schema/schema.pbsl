@@ -102,3 +102,31 @@ CREATE TABLE ScanRuns (
     imported_at  TEXT,
     stats        JSON
 );
+
+-- ---------------------------------------------------------------------------
+-- ExploitExecutions: append-only history of module executions planned against
+-- a run. Every attempt (dry run, skipped, failed, completed, still running) is
+-- recorded so exploitation activity is fully auditable alongside the findings
+-- it was derived from. Loot and session references are stored as ids into the
+-- framework database.
+-- ---------------------------------------------------------------------------
+CREATE TABLE ExploitExecutions (
+    execution_id    TEXT REQUIRED UNIQUE,
+    run_id          TEXT REQUIRED,
+    asset_id        TEXT REQUIRED,
+    vulnerability_id TEXT REQUIRED,
+    module_type     TEXT,
+    module          TEXT REQUIRED,
+    host            TEXT,
+    payload         TEXT,
+    status          TEXT,
+    start_time      TEXT,
+    finish_time     TEXT,
+    job_id          TEXT,
+    session_id      TEXT,
+    error           TEXT,
+    loot            JSON,
+    options         JSON,
+    selected        BOOLEAN,
+    created_at      TEXT
+);

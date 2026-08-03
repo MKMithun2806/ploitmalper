@@ -7,8 +7,14 @@ pub const SCHEMA_PBSL: &str = include_str!("../../schema/schema.pbsl");
 
 /// Collection names and their field definitions used by the direct
 /// PocketBase REST path.
-pub const REQUIRED_COLLECTIONS: [&str; 5] =
-    ["Assets", "Services", "Findings", "Observations", "ScanRuns"];
+pub const REQUIRED_COLLECTIONS: [&str; 6] = [
+    "Assets",
+    "Services",
+    "Findings",
+    "Observations",
+    "ScanRuns",
+    "ExploitExecutions",
+];
 
 pub struct FieldDef {
     pub name: &'static str,
@@ -397,6 +403,116 @@ pub fn field_defs(collection: &str) -> &'static [FieldDef] {
             FieldDef {
                 name: "stats",
                 kind: "json",
+                required: false,
+                unique: false,
+            },
+        ],
+        "ExploitExecutions" => &[
+            FieldDef {
+                name: "execution_id",
+                kind: "text",
+                required: true,
+                unique: true,
+            },
+            FieldDef {
+                name: "run_id",
+                kind: "text",
+                required: true,
+                unique: false,
+            },
+            FieldDef {
+                name: "asset_id",
+                kind: "text",
+                required: true,
+                unique: false,
+            },
+            FieldDef {
+                name: "vulnerability_id",
+                kind: "text",
+                required: true,
+                unique: false,
+            },
+            FieldDef {
+                name: "module_type",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "module",
+                kind: "text",
+                required: true,
+                unique: false,
+            },
+            FieldDef {
+                name: "host",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "payload",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "status",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "start_time",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "finish_time",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "job_id",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "session_id",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "error",
+                kind: "text",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "loot",
+                kind: "json",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "options",
+                kind: "json",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "selected",
+                kind: "bool",
+                required: false,
+                unique: false,
+            },
+            FieldDef {
+                name: "created_at",
+                kind: "text",
                 required: false,
                 unique: false,
             },

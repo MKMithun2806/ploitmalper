@@ -6,7 +6,7 @@ pub mod sqlite;
 
 use crate::config::DatabaseConfig;
 use crate::error::Result;
-use models::{Asset, Finding, Observation, ScanRun, Service};
+use models::{Asset, ExploitExecution, Finding, Observation, ScanRun, Service};
 
 /// Collection names used by every backend. Kept intentionally small: bulk
 /// content (full reports, long finding evidence) is stored as files in the
@@ -17,8 +17,16 @@ pub mod collections {
     pub const FINDINGS: &str = "Findings";
     pub const OBSERVATIONS: &str = "Observations";
     pub const SCAN_RUNS: &str = "ScanRuns";
+    pub const EXPLOIT_EXECUTIONS: &str = "ExploitExecutions";
 
-    pub const ALL: [&str; 5] = [ASSETS, SERVICES, FINDINGS, OBSERVATIONS, SCAN_RUNS];
+    pub const ALL: [&str; 6] = [
+        ASSETS,
+        SERVICES,
+        FINDINGS,
+        OBSERVATIONS,
+        SCAN_RUNS,
+        EXPLOIT_EXECUTIONS,
+    ];
 }
 
 /// Backend-agnostic persistence interface used by the importer.
@@ -72,6 +80,13 @@ pub trait Storage: Send {
         subject_id: &str,
     ) -> Result<Vec<Observation>>;
     fn list_all_observations(&mut self) -> Result<Vec<Observation>>;
+
+    // --- Exploit executions ---------------------------------------------
+
+    fn upsert_exploit_execution(&mut self, execution: &ExploitExecution) -> Result<()>;
+    fn get_exploit_execution(&mut self, execution_id: &str) -> Result<Option<ExploitExecution>>;
+    fn list_exploit_executions(&mut self) -> Result<Vec<ExploitExecution>>;
+    fn list_exploit_executions_for_run(&mut self, run_id: &str) -> Result<Vec<ExploitExecution>>;
 }
 
 /// Open a storage backend based on the persisted configuration.

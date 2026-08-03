@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 use crate::config::DatabaseConfig;
-use crate::db::models::{Asset, Finding, Observation, ScanRun, Service};
+use crate::db::models::{Asset, ExploitExecution, Finding, Observation, ScanRun, Service};
 use crate::db::schema::{self, FieldDef};
 use crate::db::{collections, Storage};
 use crate::error::{AppError, Result};
@@ -357,6 +357,67 @@ fn record_to_scan_run(value: &Value) -> ScanRun {
         content_hash: get_str(value, "content_hash"),
         imported_at: get_str(value, "imported_at"),
         stats: get_json(value, "stats"),
+    }
+}
+
+fn get_options_map(value: &Value, key: &str) -> std::collections::BTreeMap<String, String> {
+    value
+        .get(key)
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn exploit_execution_to_record(execution: &ExploitExecution) -> Value {
+    json!({
+        "execution_id": execution.execution_id,
+        "run_id": execution.run_id,
+        "asset_id": execution.asset_id,
+        "vulnerability_id": execution.vulnerability_id,
+        "module_type": execution.module_type,
+        "module": execution.module,
+        "host": execution.host,
+        "payload": execution.payload,
+        "status": execution.status,
+        "start_time": execution.start_time,
+        "finish_time": execution.finish_time,
+        "job_id": execution.job_id,
+        "session_id": execution.session_id,
+        "error": execution.error,
+        "loot": execution.loot,
+        "options": execution.options,
+        "selected": execution.selected,
+        "created_at": execution.created_at,
+    })
+}
+
+fn record_to_exploit_execution(value: &Value) -> ExploitExecution {
+    ExploitExecution {
+        execution_id: get_str(value, "execution_id"),
+        run_id: get_str(value, "run_id"),
+        asset_id: get_str(value, "asset_id"),
+        vulnerability_id: get_str(value, "vulnerability_id"),
+        module_type: get_str(value, "module_type"),
+        module: get_str(value, "module"),
+        host: get_str(value, "host"),
+        payload: get_opt_str(value, "payload"),
+        status: get_str(value, "status"),
+        start_time: get_str(value, "start_time"),
+        finish_time: get_opt_str(value, "finish_time"),
+        job_id: get_opt_str(value, "job_id"),
+        session_id: get_opt_str(value, "session_id"),
+        error: get_opt_str(value, "error"),
+        loot: get_vec(value, "loot"),
+        options: get_options_map(value, "options"),
+        selected: value
+            .get("selected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        created_at: get_str(value, "created_at"),
     }
 }
 
@@ -773,5 +834,33 @@ impl Storage for PocketBaseStorage {
     fn list_all_observations(&mut self) -> Result<Vec<Observation>> {
         let records = self.list_records(collections::OBSERVATIONS, None)?;
         Ok(records.iter().map(record_to_observation).collect())
+    }
+
+    fn upsert_exploit_execution(&mut self, execution: &ExploitExecution) -> Result<()> {
+        self.upsert(
+            collections::EXPLOIT_EXECUTIONS,
+            &execution.execution_id,
+            &exploit_execution_to_record(execution),
+        )
+    }
+
+    fn get_exploit_execution(&mut self, execution_id: &str) -> Result<Option<ExploitExecution>> {
+        if let Some((_, record)) =
+            self.find_record(collections::EXPLOIT_EXECUTIONS, execution_id)?
+        {
+            return Ok(Some(record_to_exploit_execution(&record)));
+        }
+        Ok(None)
+    }
+
+    fn list_exploit_executions(&mut self) -> Result<Vec<ExploitExecution>> {
+        let records = self.list_records(collections::EXPLOIT_EXECUTIONS, None)?;
+        Ok(records.iter().map(record_to_exploit_execution).collect())
+    }
+
+    fn list_exploit_executions_for_run(&mut self, run_id: &str) -> Result<Vec<ExploitExecution>> {
+        let filter = format!("run_id = \"{}\"", run_id);
+        let records = self.list_records(collections::EXPLOIT_EXECUTIONS, Some(&filter))?;
+        Ok(records.iter().map(record_to_exploit_execution).collect())
     }
 }

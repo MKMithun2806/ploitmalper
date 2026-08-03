@@ -20,7 +20,9 @@ use crate::error::{AppError, Result};
 // Command-line argument parsing
 // ---------------------------------------------------------------------------
 
-const BOOLEAN_FLAGS: &[&str] = &["verbose", "json", "new", "changed", "fixed", "help"];
+const BOOLEAN_FLAGS: &[&str] = &[
+    "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes",
+];
 const VALUE_FLAGS: &[&str] = &[
     "target",
     "since",
@@ -32,6 +34,10 @@ const VALUE_FLAGS: &[&str] = &[
     "backend",
     "pocketbase-url",
     "sqlite-path",
+    "module",
+    "payload",
+    "workspace",
+    "job-timeout",
 ];
 
 /// Minimal, consistent flag parser shared by all frontend commands.

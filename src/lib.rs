@@ -6,6 +6,7 @@ pub mod db;
 pub mod engine;
 pub mod enrich;
 pub mod error;
+pub mod exploit;
 pub mod frontend;
 pub mod ingest;
 pub mod models;

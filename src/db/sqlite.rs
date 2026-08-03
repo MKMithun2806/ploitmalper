@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
-use crate::db::models::{Asset, Finding, Observation, ScanRun, Service};
+use crate::db::models::{Asset, ExploitExecution, Finding, Observation, ScanRun, Service};
 use crate::db::{collections, Storage};
 use crate::error::Result;
 
@@ -101,9 +101,30 @@ impl SqliteStorage {
                 imported_at  TEXT,
                 stats        TEXT
             );
+            CREATE TABLE IF NOT EXISTS ExploitExecutions (
+                execution_id    TEXT PRIMARY KEY,
+                run_id          TEXT NOT NULL,
+                asset_id        TEXT NOT NULL,
+                vulnerability_id TEXT NOT NULL,
+                module_type     TEXT,
+                module          TEXT NOT NULL,
+                host            TEXT,
+                payload         TEXT,
+                status          TEXT,
+                start_time      TEXT,
+                finish_time     TEXT,
+                job_id          TEXT,
+                session_id      TEXT,
+                error           TEXT,
+                loot            TEXT,
+                options         TEXT,
+                selected        INTEGER,
+                created_at      TEXT
+            );
             CREATE INDEX IF NOT EXISTS idx_services_asset ON Services(asset_id);
             CREATE INDEX IF NOT EXISTS idx_findings_asset ON Findings(asset_id);
-            CREATE INDEX IF NOT EXISTS idx_obs_subject ON Observations(subject_type, subject_id);",
+            CREATE INDEX IF NOT EXISTS idx_obs_subject ON Observations(subject_type, subject_id);
+            CREATE INDEX IF NOT EXISTS idx_exploit_run ON ExploitExecutions(run_id);",
         )?;
         Ok(())
     }
@@ -224,6 +245,39 @@ fn scan_run_from_row(row: &Row) -> rusqlite::Result<ScanRun> {
         imported_at: row.get("imported_at")?,
         stats: parse_json(row.get("stats")?),
     })
+}
+
+fn exploit_execution_from_row(row: &Row) -> rusqlite::Result<ExploitExecution> {
+    Ok(ExploitExecution {
+        execution_id: row.get("execution_id")?,
+        run_id: row.get("run_id")?,
+        asset_id: row.get("asset_id")?,
+        vulnerability_id: row.get("vulnerability_id")?,
+        module_type: row.get("module_type")?,
+        module: row.get("module")?,
+        host: row.get("host")?,
+        payload: row.get("payload")?,
+        status: row.get("status")?,
+        start_time: row.get("start_time")?,
+        finish_time: row.get("finish_time")?,
+        job_id: row.get("job_id")?,
+        session_id: row.get("session_id")?,
+        error: row.get("error")?,
+        loot: parse_vec(row.get("loot")?),
+        options: parse_options_map(row.get("options")?),
+        selected: row.get("selected")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+fn parse_options_map(raw: Option<String>) -> std::collections::BTreeMap<String, String> {
+    match parse_json(raw) {
+        Value::Object(map) => map
+            .into_iter()
+            .filter_map(|(key, val)| val.as_str().map(|s| (key, s.to_string())))
+            .collect(),
+        _ => std::collections::BTreeMap::new(),
+    }
 }
 
 impl Storage for SqliteStorage {
@@ -486,6 +540,62 @@ impl Storage for SqliteStorage {
             .conn
             .prepare("SELECT * FROM Observations ORDER BY observed_at")?;
         let rows = stmt.query_map([], observation_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    fn upsert_exploit_execution(&mut self, execution: &ExploitExecution) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO ExploitExecutions (execution_id, run_id, asset_id, vulnerability_id, module_type, module, host, payload, status, start_time, finish_time, job_id, session_id, error, loot, options, selected, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                execution.execution_id,
+                execution.run_id,
+                execution.asset_id,
+                execution.vulnerability_id,
+                execution.module_type,
+                execution.module,
+                execution.host,
+                execution.payload,
+                execution.status,
+                execution.start_time,
+                execution.finish_time,
+                execution.job_id,
+                execution.session_id,
+                execution.error,
+                json_or_null(&execution.loot)?,
+                json_or_null(&execution.options)?,
+                execution.selected,
+                execution.created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn get_exploit_execution(&mut self, execution_id: &str) -> Result<Option<ExploitExecution>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT * FROM ExploitExecutions WHERE execution_id = ?1",
+                params![execution_id],
+                exploit_execution_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    fn list_exploit_executions(&mut self) -> Result<Vec<ExploitExecution>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM ExploitExecutions ORDER BY created_at DESC")?;
+        let rows = stmt.query_map([], exploit_execution_from_row)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    fn list_exploit_executions_for_run(&mut self, run_id: &str) -> Result<Vec<ExploitExecution>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT * FROM ExploitExecutions WHERE run_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![run_id], exploit_execution_from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }

@@ -166,6 +166,107 @@ impl MsfRpcClient {
             error: hosts.error,
         })
     }
+
+    /// Generic authenticated RPC call: `[method, token, ...params]`.
+    ///
+    /// Used by the exploitation layer for module discovery, execution and job
+    /// monitoring. Returns the raw msgpack response so the caller can map it
+    /// to strongly typed models.
+    pub fn rpc_call(
+        &self,
+        method: &str,
+        params: &[MsgValue],
+        timeout_secs: u64,
+    ) -> Result<MsgValue> {
+        let token = self
+            .token
+            .clone()
+            .ok_or_else(|| crate::error::AppError::Message("not authenticated".to_string()))?;
+        let url = build_url(&self.host, self.port, self.ssl);
+        let mut args = vec![msg_str(method), msg_str(&token)];
+        args.extend_from_slice(params);
+        let payload = encode(&msg_array(args));
+        send_request(&url, &payload, timeout_secs).map_err(crate::error::AppError::Network)
+    }
+
+    /// Verify that a module exists on the connected Metasploit instance.
+    /// `module_type` is `exploit` or `auxiliary` (the types the planner emits).
+    pub fn module_exists(&self, module_type: &str, name: &str) -> Result<bool> {
+        let method = if module_type == "auxiliary" {
+            "module.auxiliary"
+        } else {
+            "module.exploit"
+        };
+        let val = self.rpc_call(method, &[msg_str(name)], 15)?;
+        let result = val.get("result").and_then(MsgValue::as_str).unwrap_or("");
+        Ok(result == "success")
+    }
+
+    /// Fetch full module metadata (options, targets, rank, description, ...).
+    pub fn module_info(&self, module_type: &str, name: &str) -> Result<MsgValue> {
+        self.rpc_call("module.info", &[msg_str(module_type), msg_str(name)], 15)
+    }
+
+    /// Execute a module. Returns a map containing `job_id` on success or an
+    /// error payload on failure.
+    pub fn module_execute(
+        &self,
+        module_type: &str,
+        name: &str,
+        options: &BTreeMap<String, String>,
+        payload: Option<&str>,
+    ) -> Result<MsgValue> {
+        let mut opts = BTreeMap::new();
+        for (key, value) in options {
+            opts.insert(key.clone(), msg_str(value));
+        }
+        if let Some(payload) = payload {
+            opts.insert("PAYLOAD".to_string(), msg_str(payload));
+        }
+        self.rpc_call(
+            "module.execute",
+            &[msg_str(module_type), msg_str(name), MsgValue::Map(opts)],
+            30,
+        )
+    }
+
+    /// List all running jobs. Response map: `{ "jobs": { "0": {...}, ... } }`.
+    pub fn job_list(&self) -> Result<MsgValue> {
+        self.rpc_call("job.list", &[], 15)
+    }
+
+    /// Fetch status of a single job by id.
+    pub fn job_info(&self, job_id: &str) -> Result<MsgValue> {
+        self.rpc_call("job.info", &[msg_str(job_id)], 15)
+    }
+
+    /// Stop a running job by id.
+    pub fn job_stop(&self, job_id: &str) -> Result<MsgValue> {
+        self.rpc_call("job.stop", &[msg_str(job_id)], 15)
+    }
+
+    /// List current sessions. Response map: `{ "sessions": { "1": {...}, ... } }`.
+    pub fn session_list(&self) -> Result<MsgValue> {
+        self.rpc_call("session.list", &[], 15)
+    }
+
+    /// List loot records for a workspace.
+    pub fn db_loots(&self, workspace: &str) -> Result<MsgValue> {
+        let mut opts = BTreeMap::new();
+        if !workspace.is_empty() {
+            opts.insert("workspace".to_string(), msg_str(workspace));
+        }
+        self.rpc_call("db.loots", &[MsgValue::Map(opts)], 15)
+    }
+}
+
+/// Convenience constructors for msgpack values used across the RPC layer.
+fn msg_str(value: &str) -> MsgValue {
+    MsgValue::String(value.to_string())
+}
+
+fn msg_array(values: Vec<MsgValue>) -> MsgValue {
+    MsgValue::Array(values)
 }
 
 fn build_url(host: &str, port: u16, ssl: bool) -> String {
@@ -251,14 +352,6 @@ fn find_header_body_boundary(data: &[u8]) -> Option<usize> {
     data.windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|p| p + 4)
-}
-
-fn msg_str(value: &str) -> MsgValue {
-    MsgValue::String(value.to_string())
-}
-
-fn msg_array(values: Vec<MsgValue>) -> MsgValue {
-    MsgValue::Array(values)
 }
 
 fn extract_workspaces(val: &MsgValue) -> Vec<MSFWorkspaceInfo> {

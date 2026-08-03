@@ -69,6 +69,9 @@ pub fn run() -> Result<()> {
         "diff" => {
             crate::frontend::diff::cmd_diff(&args[1..], &mut config_mgr)?;
         }
+        "exploit" => {
+            crate::exploit::cli::cmd_exploit(&args[1..], &mut config_mgr)?;
+        }
         "-h" | "--help" => {
             print_banner();
         }
@@ -696,6 +699,7 @@ fn print_banner() {
     println!("  history <id>     Show the observation timeline for an asset/service/finding");
     println!("  runs             List all scan runs");
     println!("  diff [a] [b]     Compare two scan runs (latest two by default)");
+    println!("  exploit <run_id>  Plan and run exploits from a scan run against a framework");
     println!("  share            Start temporary file server");
     println!("  setup            Configure MSF-RPC and NVD API credentials");
     println!("  reset-config     Reset stored configuration");

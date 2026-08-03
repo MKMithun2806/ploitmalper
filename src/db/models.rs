@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -230,6 +231,61 @@ impl ScanRun {
             imported_at: now_utc(),
             stats: Value::Object(Default::default()),
             ..Default::default()
+        }
+    }
+}
+
+/// A single recorded module execution against a target. History is append-only
+/// so that every attempt — including dry runs, skipped steps, and failures —
+/// is preserved alongside the run it was planned from.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExploitExecution {
+    pub execution_id: String,
+    pub run_id: String,
+    pub asset_id: String,
+    pub vulnerability_id: String,
+    pub module_type: String,
+    pub module: String,
+    pub host: String,
+    pub payload: Option<String>,
+    pub status: String,
+    pub start_time: String,
+    pub finish_time: Option<String>,
+    pub job_id: Option<String>,
+    pub session_id: Option<String>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub loot: Vec<String>,
+    #[serde(default)]
+    pub options: BTreeMap<String, String>,
+    /// Whether the operator selected this step in the checklist.
+    pub selected: bool,
+    pub created_at: String,
+}
+
+impl ExploitExecution {
+    pub fn new(run_id: &str, asset_id: &str, vulnerability_id: &str, module: &str) -> Self {
+        let key = format!("{}:{}:{}:{}", run_id, asset_id, vulnerability_id, module);
+        let now = now_utc();
+        Self {
+            execution_id: sha256_hex(&format!("exploit_exec:{}:{}", key, now)),
+            run_id: run_id.to_string(),
+            asset_id: asset_id.to_string(),
+            vulnerability_id: vulnerability_id.to_string(),
+            module: module.to_string(),
+            module_type: String::new(),
+            host: String::new(),
+            payload: None,
+            status: String::new(),
+            start_time: now.clone(),
+            finish_time: None,
+            job_id: None,
+            session_id: None,
+            error: None,
+            loot: Vec::new(),
+            options: BTreeMap::new(),
+            selected: false,
+            created_at: now,
         }
     }
 }
