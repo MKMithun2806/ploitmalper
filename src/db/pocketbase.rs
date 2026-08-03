@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 use crate::config::DatabaseConfig;
-use crate::db::models::{Asset, Finding, Observation, Relationship, Report, ScanRun, Service};
+use crate::db::models::{Asset, Finding, Observation, ScanRun, Service};
 use crate::db::schema::{self, FieldDef};
 use crate::db::{collections, Storage};
 use crate::error::{AppError, Result};
@@ -39,7 +39,9 @@ fn curl_request(
         .arg("-H")
         .arg("Content-Type: application/json")
         .arg("-w")
-        .arg("\n%{http_code}");
+        .arg("\n%{http_code}")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     if let Some(token) = token {
         command
@@ -60,12 +62,7 @@ fn curl_request(
         if method != "GET" {
             command.arg("-X").arg(method);
         }
-        command
-            .arg("--data-binary")
-            .arg("@-")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.arg("--data-binary").arg("@-").stdin(Stdio::piped());
     } else if method != "GET" {
         command.arg("-X").arg(method);
     }
@@ -261,6 +258,9 @@ fn finding_to_record(finding: &Finding) -> Value {
     if let Some(v) = &finding.detail {
         record.insert("detail".into(), json!(v));
     }
+    if let Some(v) = &finding.detail_path {
+        record.insert("detail_path".into(), json!(v));
+    }
     if let Some(v) = &finding.reference {
         record.insert("reference".into(), json!(v));
     }
@@ -287,6 +287,7 @@ fn record_to_finding(value: &Value) -> Finding {
         tool: get_str(value, "tool"),
         target_url: get_opt_str(value, "target_url"),
         detail: get_opt_str(value, "detail"),
+        detail_path: get_opt_str(value, "detail_path"),
         reference: get_opt_str(value, "reference"),
         cves: get_vec(value, "cves"),
         endpoints: get_vec(value, "endpoints"),
@@ -327,32 +328,6 @@ fn record_to_observation(value: &Value) -> Observation {
     }
 }
 
-fn relationship_to_record(relationship: &Relationship) -> Value {
-    json!({
-        "stable_id": relationship.stable_id,
-        "run_id": relationship.run_id,
-        "subject_type": relationship.subject_type,
-        "subject_id": relationship.subject_id,
-        "object_type": relationship.object_type,
-        "object_id": relationship.object_id,
-        "kind": relationship.kind,
-        "detail": relationship.detail,
-    })
-}
-
-fn record_to_relationship(value: &Value) -> Relationship {
-    Relationship {
-        stable_id: get_str(value, "stable_id"),
-        run_id: get_str(value, "run_id"),
-        subject_type: get_str(value, "subject_type"),
-        subject_id: get_str(value, "subject_id"),
-        object_type: get_str(value, "object_type"),
-        object_id: get_str(value, "object_id"),
-        kind: get_str(value, "kind"),
-        detail: get_str(value, "detail"),
-    }
-}
-
 fn scan_run_to_record(run: &ScanRun) -> Value {
     json!({
         "stable_id": run.stable_id,
@@ -383,34 +358,6 @@ fn record_to_scan_run(value: &Value) -> ScanRun {
     }
 }
 
-fn report_to_record(report: &Report) -> Value {
-    json!({
-        "stable_id": report.stable_id,
-        "run_id": report.run_id,
-        "tool": report.tool,
-        "format": report.format,
-        "title": report.title,
-        "source_path": report.source_path,
-        "content": report.content,
-        "content_hash": report.content_hash,
-        "imported_at": report.imported_at,
-    })
-}
-
-fn record_to_report(value: &Value) -> Report {
-    Report {
-        stable_id: get_str(value, "stable_id"),
-        run_id: get_str(value, "run_id"),
-        tool: get_str(value, "tool"),
-        format: get_str(value, "format"),
-        title: get_str(value, "title"),
-        source_path: get_str(value, "source_path"),
-        content: get_str(value, "content"),
-        content_hash: get_str(value, "content_hash"),
-        imported_at: get_str(value, "imported_at"),
-    }
-}
-
 impl PocketBaseStorage {
     pub fn new(config: &DatabaseConfig) -> Result<Self> {
         let mut url = config.pocketbase_url.trim().to_string();
@@ -431,9 +378,14 @@ impl PocketBaseStorage {
         &self.config.pocketbase_url
     }
 
+    /// Current auth token, if a login has been performed.
+    pub fn token(&self) -> String {
+        self.token.clone()
+    }
+
     /// Authenticate with the configured superuser credentials and cache a
     /// fresh token. Returns the token.
-    fn login(&mut self) -> Result<String> {
+    pub fn login(&mut self) -> Result<String> {
         let email = self.config.pocketbase_admin_email.trim();
         let password = self.config.pocketbase_admin_password.trim();
         if email.is_empty() || password.is_empty() {
@@ -475,7 +427,7 @@ impl PocketBaseStorage {
         self.login()
     }
 
-    fn list_collection_names(&mut self) -> Result<Vec<String>> {
+    pub fn list_collection_names(&mut self) -> Result<Vec<String>> {
         let token = self.ensure_token()?;
         let url = format!("{}/api/collections", self.base_url());
         let resp = curl_request("GET", &url, Some(&token), None, &[("perPage", "200")])?;
@@ -656,15 +608,8 @@ impl Storage for PocketBaseStorage {
     }
 
     fn ensure_schema(&mut self) -> Result<()> {
-        // Prefer pbctl for declarative schema management.
-        if schema::pbctl_available() {
-            let output = schema::pbctl_apply(&self.config, false)?;
-            if output.success() {
-                return Ok(());
-            }
-            // Fall through to the direct API only if pbctl itself failed.
-            eprintln!("[!] pbctl apply reported: {}", output.combined().trim());
-        }
+        // Pure REST API path — no pbctl required. Create any required
+        // collections that are missing; leave existing ones untouched.
         let existing = self.list_collection_names()?;
         for name in collections::ALL {
             if !existing.iter().any(|n| n == name) {
@@ -799,54 +744,5 @@ impl Storage for PocketBaseStorage {
     fn list_all_observations(&mut self) -> Result<Vec<Observation>> {
         let records = self.list_records(collections::OBSERVATIONS, None)?;
         Ok(records.iter().map(record_to_observation).collect())
-    }
-
-    fn upsert_relationship(&mut self, relationship: &Relationship) -> Result<()> {
-        self.upsert(
-            collections::RELATIONSHIPS,
-            &relationship.stable_id,
-            &relationship_to_record(relationship),
-        )
-    }
-
-    fn get_relationship(&mut self, rel_id: &str) -> Result<Option<Relationship>> {
-        if let Some((_, record)) = self.find_record(collections::RELATIONSHIPS, rel_id)? {
-            return Ok(Some(record_to_relationship(&record)));
-        }
-        Ok(None)
-    }
-
-    fn list_relationships_for(
-        &mut self,
-        subject_type: &str,
-        subject_id: &str,
-    ) -> Result<Vec<Relationship>> {
-        let filter = format!(
-            "subject_type = \"{}\" && subject_id = \"{}\"",
-            subject_type, subject_id
-        );
-        let records = self.list_records(collections::RELATIONSHIPS, Some(&filter))?;
-        Ok(records.iter().map(record_to_relationship).collect())
-    }
-
-    fn upsert_report(&mut self, report: &Report) -> Result<()> {
-        self.upsert(
-            collections::REPORTS,
-            &report.stable_id,
-            &report_to_record(report),
-        )
-    }
-
-    fn get_report(&mut self, report_id: &str) -> Result<Option<Report>> {
-        if let Some((_, record)) = self.find_record(collections::REPORTS, report_id)? {
-            return Ok(Some(record_to_report(&record)));
-        }
-        Ok(None)
-    }
-
-    fn list_reports_for_run(&mut self, run_id: &str) -> Result<Vec<Report>> {
-        let filter = format!("run_id = \"{}\"", run_id);
-        let records = self.list_records(collections::REPORTS, Some(&filter))?;
-        Ok(records.iter().map(record_to_report).collect())
     }
 }

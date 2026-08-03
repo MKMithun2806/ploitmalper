@@ -3,7 +3,7 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 
-use crate::db::models::{Asset, Finding, Observation, Relationship, Report, ScanRun, Service};
+use crate::db::models::{Asset, Finding, Observation, ScanRun, Service};
 use crate::db::{collections, Storage};
 use crate::error::Result;
 
@@ -67,6 +67,7 @@ impl SqliteStorage {
                 tool            TEXT,
                 target_url      TEXT,
                 detail          TEXT,
+                detail_path     TEXT,
                 reference       TEXT,
                 cves            TEXT,
                 endpoints       TEXT,
@@ -88,16 +89,6 @@ impl SqliteStorage {
                 detail       TEXT,
                 observed_at  TEXT
             );
-            CREATE TABLE IF NOT EXISTS Relationships (
-                stable_id    TEXT PRIMARY KEY,
-                run_id       TEXT,
-                subject_type TEXT NOT NULL,
-                subject_id   TEXT NOT NULL,
-                object_type  TEXT NOT NULL,
-                object_id    TEXT NOT NULL,
-                kind         TEXT NOT NULL,
-                detail       TEXT
-            );
             CREATE TABLE IF NOT EXISTS ScanRuns (
                 stable_id    TEXT PRIMARY KEY,
                 target       TEXT NOT NULL,
@@ -110,22 +101,9 @@ impl SqliteStorage {
                 imported_at  TEXT,
                 stats        TEXT
             );
-            CREATE TABLE IF NOT EXISTS Reports (
-                stable_id    TEXT PRIMARY KEY,
-                run_id       TEXT NOT NULL,
-                tool         TEXT NOT NULL,
-                format       TEXT NOT NULL,
-                title        TEXT,
-                source_path  TEXT,
-                content      TEXT,
-                content_hash TEXT,
-                imported_at  TEXT
-            );
             CREATE INDEX IF NOT EXISTS idx_services_asset ON Services(asset_id);
             CREATE INDEX IF NOT EXISTS idx_findings_asset ON Findings(asset_id);
-            CREATE INDEX IF NOT EXISTS idx_obs_subject ON Observations(subject_type, subject_id);
-            CREATE INDEX IF NOT EXISTS idx_rel_subject ON Relationships(subject_type, subject_id);
-            CREATE INDEX IF NOT EXISTS idx_reports_run ON Reports(run_id);",
+            CREATE INDEX IF NOT EXISTS idx_obs_subject ON Observations(subject_type, subject_id);",
         )?;
         Ok(())
     }
@@ -206,6 +184,7 @@ fn finding_from_row(row: &Row) -> rusqlite::Result<Finding> {
         tool: row.get("tool")?,
         target_url: row.get("target_url")?,
         detail: row.get("detail")?,
+        detail_path: row.get("detail_path")?,
         reference: row.get("reference")?,
         cves: parse_vec(row.get("cves")?),
         endpoints: parse_vec(row.get("endpoints")?),
@@ -232,19 +211,6 @@ fn observation_from_row(row: &Row) -> rusqlite::Result<Observation> {
     })
 }
 
-fn relationship_from_row(row: &Row) -> rusqlite::Result<Relationship> {
-    Ok(Relationship {
-        stable_id: row.get("stable_id")?,
-        run_id: row.get("run_id")?,
-        subject_type: row.get("subject_type")?,
-        subject_id: row.get("subject_id")?,
-        object_type: row.get("object_type")?,
-        object_id: row.get("object_id")?,
-        kind: row.get("kind")?,
-        detail: row.get("detail")?,
-    })
-}
-
 fn scan_run_from_row(row: &Row) -> rusqlite::Result<ScanRun> {
     Ok(ScanRun {
         stable_id: row.get("stable_id")?,
@@ -257,20 +223,6 @@ fn scan_run_from_row(row: &Row) -> rusqlite::Result<ScanRun> {
         content_hash: row.get("content_hash")?,
         imported_at: row.get("imported_at")?,
         stats: parse_json(row.get("stats")?),
-    })
-}
-
-fn report_from_row(row: &Row) -> rusqlite::Result<Report> {
-    Ok(Report {
-        stable_id: row.get("stable_id")?,
-        run_id: row.get("run_id")?,
-        tool: row.get("tool")?,
-        format: row.get("format")?,
-        title: row.get("title")?,
-        source_path: row.get("source_path")?,
-        content: row.get("content")?,
-        content_hash: row.get("content_hash")?,
-        imported_at: row.get("imported_at")?,
     })
 }
 
@@ -429,8 +381,8 @@ impl Storage for SqliteStorage {
 
     fn upsert_finding(&mut self, finding: &Finding) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO Findings (stable_id, asset_id, service_id, title, severity, tool, target_url, detail, reference, cves, endpoints, technologies, first_seen, last_seen, status, exploitability, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT OR REPLACE INTO Findings (stable_id, asset_id, service_id, title, severity, tool, target_url, detail, detail_path, reference, cves, endpoints, technologies, first_seen, last_seen, status, exploitability, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 finding.stable_id,
                 finding.asset_id,
@@ -440,6 +392,7 @@ impl Storage for SqliteStorage {
                 finding.tool,
                 finding.target_url,
                 finding.detail,
+                finding.detail_path,
                 finding.reference,
                 json_or_null(&finding.cves)?,
                 json_or_null(&finding.endpoints)?,
@@ -533,87 +486,6 @@ impl Storage for SqliteStorage {
             .conn
             .prepare("SELECT * FROM Observations ORDER BY observed_at")?;
         let rows = stmt.query_map([], observation_from_row)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    fn upsert_relationship(&mut self, relationship: &Relationship) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO Relationships (stable_id, run_id, subject_type, subject_id, object_type, object_id, kind, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                relationship.stable_id,
-                relationship.run_id,
-                relationship.subject_type,
-                relationship.subject_id,
-                relationship.object_type,
-                relationship.object_id,
-                relationship.kind,
-                relationship.detail
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn get_relationship(&mut self, rel_id: &str) -> Result<Option<Relationship>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT * FROM Relationships WHERE stable_id = ?1",
-                params![rel_id],
-                relationship_from_row,
-            )
-            .optional()?;
-        Ok(row)
-    }
-
-    fn list_relationships_for(
-        &mut self,
-        subject_type: &str,
-        subject_id: &str,
-    ) -> Result<Vec<Relationship>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT * FROM Relationships WHERE subject_type = ?1 AND subject_id = ?2 ORDER BY kind",
-        )?;
-        let rows = stmt.query_map(params![subject_type, subject_id], relationship_from_row)?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    fn upsert_report(&mut self, report: &Report) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO Reports (stable_id, run_id, tool, format, title, source_path, content, content_hash, imported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                report.stable_id,
-                report.run_id,
-                report.tool,
-                report.format,
-                report.title,
-                report.source_path,
-                report.content,
-                report.content_hash,
-                report.imported_at
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn get_report(&mut self, report_id: &str) -> Result<Option<Report>> {
-        let row = self
-            .conn
-            .query_row(
-                "SELECT * FROM Reports WHERE stable_id = ?1",
-                params![report_id],
-                report_from_row,
-            )
-            .optional()?;
-        Ok(row)
-    }
-
-    fn list_reports_for_run(&mut self, run_id: &str) -> Result<Vec<Report>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM Reports WHERE run_id = ?1 ORDER BY tool")?;
-        let rows = stmt.query_map(params![run_id], report_from_row)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }

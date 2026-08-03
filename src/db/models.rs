@@ -109,7 +109,11 @@ pub struct Finding {
     pub severity: String,
     pub tool: String,
     pub target_url: Option<String>,
+    /// Short excerpt kept in the database; full evidence lives in a file
+    /// referenced by `detail_path`.
     pub detail: Option<String>,
+    /// Relative path into the content store holding the full detail/evidence.
+    pub detail_path: Option<String>,
     pub reference: Option<String>,
     #[serde(default)]
     pub cves: Vec<String>,
@@ -190,47 +194,6 @@ impl Observation {
     }
 }
 
-/// A typed relationship between two records (asset hosts service, service maps
-/// to finding, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Relationship {
-    pub stable_id: String,
-    pub run_id: String,
-    pub subject_type: String,
-    pub subject_id: String,
-    pub object_type: String,
-    pub object_id: String,
-    pub kind: String,
-    pub detail: String,
-}
-
-impl Relationship {
-    pub fn new(
-        run_id: &str,
-        subject_type: &str,
-        subject_id: &str,
-        object_type: &str,
-        object_id: &str,
-        kind: &str,
-        detail: &str,
-    ) -> Self {
-        let key = format!(
-            "{}:{}:{}:{}:{}",
-            subject_type, subject_id, object_type, object_id, kind
-        );
-        Self {
-            stable_id: stable_id("relationship", &key),
-            run_id: run_id.to_string(),
-            subject_type: subject_type.to_string(),
-            subject_id: subject_id.to_string(),
-            object_type: object_type.to_string(),
-            object_id: object_id.to_string(),
-            kind: kind.to_string(),
-            detail: detail.to_string(),
-        }
-    }
-}
-
 /// Metadata describing one logical scan run over a target.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ScanRun {
@@ -267,45 +230,6 @@ impl ScanRun {
             imported_at: now_utc(),
             stats: Value::Object(Default::default()),
             ..Default::default()
-        }
-    }
-}
-
-/// A stored report artifact (vulnmalper markdown, ploitmalper report, ...).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct Report {
-    pub stable_id: String,
-    pub run_id: String,
-    pub tool: String,
-    pub format: String,
-    pub title: String,
-    pub source_path: String,
-    pub content: String,
-    pub content_hash: String,
-    pub imported_at: String,
-}
-
-impl Report {
-    pub fn new(
-        run_id: &str,
-        tool: &str,
-        format: &str,
-        title: &str,
-        source_path: &str,
-        content: &str,
-        content_hash: &str,
-    ) -> Self {
-        let key = format!("{}:{}:{}:{}", run_id, tool, format, content_hash);
-        Self {
-            stable_id: stable_id("report", &key),
-            run_id: run_id.to_string(),
-            tool: tool.to_string(),
-            format: format.to_string(),
-            title: title.to_string(),
-            source_path: source_path.to_string(),
-            content: content.to_string(),
-            content_hash: content_hash.to_string(),
-            imported_at: now_utc(),
         }
     }
 }

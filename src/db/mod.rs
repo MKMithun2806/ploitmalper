@@ -1,3 +1,4 @@
+pub mod content;
 pub mod models;
 pub mod pocketbase;
 pub mod schema;
@@ -5,27 +6,19 @@ pub mod sqlite;
 
 use crate::config::DatabaseConfig;
 use crate::error::Result;
-use models::{Asset, Finding, Observation, Relationship, Report, ScanRun, Service};
+use models::{Asset, Finding, Observation, ScanRun, Service};
 
-/// Collection names used by every backend.
+/// Collection names used by every backend. Kept intentionally small: bulk
+/// content (full reports, long finding evidence) is stored as files in the
+/// content store, so the database only holds metadata and short fields.
 pub mod collections {
     pub const ASSETS: &str = "Assets";
     pub const SERVICES: &str = "Services";
     pub const FINDINGS: &str = "Findings";
     pub const OBSERVATIONS: &str = "Observations";
-    pub const RELATIONSHIPS: &str = "Relationships";
     pub const SCAN_RUNS: &str = "ScanRuns";
-    pub const REPORTS: &str = "Reports";
 
-    pub const ALL: [&str; 7] = [
-        ASSETS,
-        SERVICES,
-        FINDINGS,
-        OBSERVATIONS,
-        RELATIONSHIPS,
-        SCAN_RUNS,
-        REPORTS,
-    ];
+    pub const ALL: [&str; 5] = [ASSETS, SERVICES, FINDINGS, OBSERVATIONS, SCAN_RUNS];
 }
 
 /// Backend-agnostic persistence interface used by the importer.
@@ -79,22 +72,6 @@ pub trait Storage: Send {
         subject_id: &str,
     ) -> Result<Vec<Observation>>;
     fn list_all_observations(&mut self) -> Result<Vec<Observation>>;
-
-    // --- Relationships --------------------------------------------------
-
-    fn upsert_relationship(&mut self, relationship: &Relationship) -> Result<()>;
-    fn get_relationship(&mut self, rel_id: &str) -> Result<Option<Relationship>>;
-    fn list_relationships_for(
-        &mut self,
-        subject_type: &str,
-        subject_id: &str,
-    ) -> Result<Vec<Relationship>>;
-
-    // --- Reports --------------------------------------------------------
-
-    fn upsert_report(&mut self, report: &Report) -> Result<()>;
-    fn get_report(&mut self, report_id: &str) -> Result<Option<Report>>;
-    fn list_reports_for_run(&mut self, run_id: &str) -> Result<Vec<Report>>;
 }
 
 /// Open a storage backend based on the persisted configuration.

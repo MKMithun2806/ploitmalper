@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::ConfigManager;
+use crate::db::Storage;
 use crate::engine::{dedup, matcher, msfrpc, parser};
 use crate::error::{AppError, Result};
 use crate::models::{DedupStats, ModuleSuggestion, PayloadRecipe};
@@ -342,7 +343,7 @@ fn cmd_reset_config(config_mgr: &mut ConfigManager) -> Result<()> {
 }
 
 fn cmd_db_setup(config_mgr: &mut ConfigManager) -> Result<()> {
-    let verbose = std::env::args().any(|a| a == "--verbose" || a == "-v");
+    let _verbose = std::env::args().any(|a| a == "--verbose" || a == "-v");
 
     println!("PloitMalper Database Setup");
     println!();
@@ -367,56 +368,52 @@ fn cmd_db_setup(config_mgr: &mut ConfigManager) -> Result<()> {
             prompt_text("Admin password", &db.pocketbase_admin_password)?;
 
         println!();
-        println!("[+] Preparing schema file...");
+        println!("[+] Writing schema reference file...");
         crate::db::schema::write_schema_file()?;
         println!(
-            "[+] Schema written to {}",
+            "[+] Schema reference written to {}",
             crate::config::db_schema_file().display()
         );
 
-        if !crate::db::schema::pbctl_available() {
-            println!("[!] pbctl not found on PATH; falling back to direct PocketBase API.");
+        let mut storage = crate::db::pocketbase::PocketBaseStorage::new(&db)?;
+        if !storage.ping()? {
+            return Err(AppError::Message(format!(
+                "PocketBase is not reachable at {}",
+                db.pocketbase_url
+            )));
+        }
+        println!("[+] Connected to PocketBase at {}", db.pocketbase_url);
+
+        println!("[+] Authenticating as superuser...");
+        storage.login()?;
+        println!("[+] Authenticated.");
+
+        // Show a plan (existing vs missing collections) before mutating.
+        let existing = storage.list_collection_names()?;
+        let missing: Vec<&str> = crate::db::collections::ALL
+            .iter()
+            .filter(|name| !existing.iter().any(|e| e == *name))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            println!(
+                "[+] All {} required collections already present.",
+                crate::db::collections::ALL.len()
+            );
         } else {
-            println!();
-            println!("--- Schema plan (pbctl plan) ---");
-            let plan = crate::db::schema::pbctl_plan(&db, verbose)?;
-            print!("{}", plan.combined());
-            if !plan.success() {
-                return Err(AppError::Message(format!(
-                    "pbctl plan failed (exit {})",
-                    plan.exit_code
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "?".to_string())
-                )));
+            println!("[+] Missing collections (will be created):");
+            for name in &missing {
+                println!("    - {}", name);
             }
+        }
+        if !missing.is_empty() && prompt_bool_with_default("Create missing collections?", true)? {
+            storage.ensure_schema()?;
+            println!("[+] Schema applied.");
+        } else {
+            println!("[!] No collections created.");
         }
 
-        if prompt_bool_with_default("Apply schema to PocketBase?", true)? {
-            if crate::db::schema::pbctl_available() {
-                println!("[+] Applying schema via pbctl...");
-                let out = crate::db::schema::pbctl_apply(&db, verbose)?;
-                print!("{}", out.combined());
-                if !out.success() {
-                    return Err(AppError::Message(format!(
-                        "pbctl apply failed (exit {})",
-                        out.exit_code
-                            .map(|c| c.to_string())
-                            .unwrap_or_else(|| "?".to_string())
-                    )));
-                }
-            } else {
-                println!("[+] Creating collections via PocketBase API...");
-                let mut storage = crate::db::open_storage(&db)?;
-                if !storage.ping()? {
-                    return Err(AppError::Message(
-                        "PocketBase is not reachable at the configured URL".to_string(),
-                    ));
-                }
-                storage.ensure_schema()?;
-            }
-        } else {
-            println!("[!] Schema not applied. Configuration saved for later use.");
-        }
+        db.pocketbase_token = storage.token();
     } else {
         println!();
         println!("--- SQLite Configuration ---");
@@ -527,8 +524,6 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
     println!("    assets:        {}", summary.assets);
     println!("    services:      {}", summary.services);
     println!("    findings:      {}", summary.findings);
-    println!("    relationships: {}", summary.relationships);
-    println!("    reports:       {}", summary.reports);
     println!("    observations:  {}", summary.observations);
     Ok(())
 }

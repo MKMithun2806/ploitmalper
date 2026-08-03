@@ -1,7 +1,8 @@
 -- PloitMalper stateful intelligence schema.
 --
--- Managed declaratively with pbctl (PocketBase Schema Language).
--- https://github.com/MKMithun2806/pbctl
+-- The database holds only metadata and short fields; bulk content (full
+-- reports, long finding evidence) is stored as files in the content store
+-- and referenced by path.
 --
 -- The database holds the current state of the Malper ecosystem plus full
 -- history. JSON scan artifacts remain immutable; this schema stores only the
@@ -45,7 +46,8 @@ CREATE TABLE Services (
 );
 
 -- ---------------------------------------------------------------------------
--- Findings: vulnerabilities / security findings on an asset.
+-- Findings: vulnerabilities / security findings on an asset. Full detail is
+-- stored as a file; `detail_path` points into the content store.
 -- ---------------------------------------------------------------------------
 CREATE TABLE Findings (
     stable_id      TEXT REQUIRED UNIQUE,
@@ -56,6 +58,7 @@ CREATE TABLE Findings (
     tool           TEXT,
     target_url     TEXT,
     detail         TEXT,
+    detail_path    TEXT,
     reference      TEXT,
     cves           JSON,
     endpoints      JSON,
@@ -83,21 +86,9 @@ CREATE TABLE Observations (
 );
 
 -- ---------------------------------------------------------------------------
--- Relationships: typed links between records (asset -> service -> finding).
--- ---------------------------------------------------------------------------
-CREATE TABLE Relationships (
-    stable_id    TEXT REQUIRED UNIQUE,
-    run_id       TEXT,
-    subject_type TEXT REQUIRED,
-    subject_id   TEXT REQUIRED,
-    object_type  TEXT REQUIRED,
-    object_id    TEXT REQUIRED,
-    kind         TEXT REQUIRED,
-    detail       TEXT
-);
-
--- ---------------------------------------------------------------------------
 -- ScanRuns: one logical scan over a target (may cover several artifacts).
+-- Report content is stored as files; ScanRuns.artifacts records each source
+-- artifact including a `content_path` for report documents.
 -- ---------------------------------------------------------------------------
 CREATE TABLE ScanRuns (
     stable_id    TEXT REQUIRED UNIQUE,
@@ -110,19 +101,4 @@ CREATE TABLE ScanRuns (
     content_hash TEXT,
     imported_at  TEXT,
     stats        JSON
-);
-
--- ---------------------------------------------------------------------------
--- Reports: stored scan / analysis reports associated with a run.
--- ---------------------------------------------------------------------------
-CREATE TABLE Reports (
-    stable_id    TEXT REQUIRED UNIQUE,
-    run_id       TEXT REQUIRED,
-    tool         TEXT REQUIRED,
-    format       TEXT REQUIRED,
-    title        TEXT,
-    source_path  TEXT,
-    content      TEXT,
-    content_hash TEXT,
-    imported_at  TEXT
 );

@@ -6,9 +6,9 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::config::DatabaseConfig;
+use crate::db::content;
 use crate::db::models::{
-    now_utc, sha256_hex, Asset, Finding, Observation, Relationship, Report, ScanRun, Service,
-    ASSET_REMOVED,
+    now_utc, sha256_hex, Asset, Finding, Observation, ScanRun, Service, ASSET_REMOVED,
 };
 use crate::db::Storage;
 use crate::error::{AppError, Result};
@@ -49,8 +49,6 @@ pub struct IngestSummary {
     pub assets: usize,
     pub services: usize,
     pub findings: usize,
-    pub relationships: usize,
-    pub reports: usize,
     pub observations: usize,
     pub skipped_already_imported: bool,
     pub dry_run: bool,
@@ -254,12 +252,10 @@ pub fn ingest_folder(
     // Build the new world state in dependency order.
     // ------------------------------------------------------------------
     let mut ctx = BuildContext {
-        run_id: run_id.clone(),
         assets: HashMap::new(),
         services: HashMap::new(),
         findings: HashMap::new(),
-        relationships: Vec::new(),
-        reports: Vec::new(),
+        report_content_paths: HashMap::new(),
         has_vulnmalper_json: false,
     };
 
@@ -301,49 +297,33 @@ pub fn ingest_folder(
     }
     summary.observations = observations.len();
 
-    // Deduplicate relationships by stable id before counting and storing.
-    let mut seen_relationships = HashSet::new();
-    ctx.relationships
-        .retain(|rel| seen_relationships.insert(rel.stable_id.clone()));
-    for relationship in &ctx.relationships {
-        storage.upsert_relationship(relationship)?;
-    }
-    summary.relationships = ctx.relationships.len();
-
-    for report in &ctx.reports {
-        storage.upsert_report(report)?;
-    }
-    summary.reports = ctx.reports.len();
-
     // ------------------------------------------------------------------
     // Scan run record
     // ------------------------------------------------------------------
-    let tools: Vec<String> = ctx
-        .reports
+    let tools = accepted
         .iter()
-        .map(|r| r.tool.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    let mut tools = tools;
-    if accepted
-        .iter()
-        .any(|a| a.kind == ArtifactKind::NetMalperGraph)
-    {
-        tools.push("netmalper".to_string());
-    }
+        .map(|a| tool_for_kind(a.kind))
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let mut tools: Vec<String> = tools.into_iter().collect();
     tools.sort();
     tools.dedup();
 
     let artifact_refs: Vec<Value> = accepted
         .iter()
         .map(|a| {
-            json!({
+            let mut entry = json!({
                 "path": a.path.display().to_string(),
                 "kind": a.kind.label(),
                 "size": a.size,
                 "hash": a.hash,
-            })
+            });
+            if let Some(rel) = ctx.report_content_paths.get(&a.hash) {
+                entry["content_path"] = json!(rel);
+                entry["tool"] = json!(tool_for_kind(a.kind));
+            }
+            entry
         })
         .collect();
 
@@ -361,8 +341,6 @@ pub fn ingest_folder(
         "assets": summary.assets,
         "services": summary.services,
         "findings": summary.findings,
-        "relationships": summary.relationships,
-        "reports": summary.reports,
         "observations": summary.observations,
     });
     storage.upsert_scan_run(&run)?;
@@ -370,13 +348,8 @@ pub fn ingest_folder(
     if opts.verbose {
         println!("[+] Imported run {} (target={})", run_id, primary);
         println!(
-            "    assets={} services={} findings={} relationships={} reports={} observations={}",
-            summary.assets,
-            summary.services,
-            summary.findings,
-            summary.relationships,
-            summary.reports,
-            summary.observations
+            "    assets={} services={} findings={} observations={}",
+            summary.assets, summary.services, summary.findings, summary.observations
         );
     }
 
@@ -602,6 +575,24 @@ fn classify_target(value: &str) -> &'static str {
     }
 }
 
+/// The tool that produced an artifact, used for ScanRun.tools and report refs.
+fn tool_for_kind(kind: ArtifactKind) -> &'static str {
+    match kind {
+        ArtifactKind::NetMalperGraph => "netmalper",
+        ArtifactKind::VulnMalperJson | ArtifactKind::VulnMalperMarkdown => "vulnmalper",
+        ArtifactKind::PloitMalperReport => "ploitmalper",
+        ArtifactKind::MalperAnalyse => "",
+    }
+}
+
+/// Store a report artifact's full content in the content store and remember
+/// where it went so the ScanRun record can reference it.
+fn store_report(ctx: &mut BuildContext, artifact: &Artifact) -> Result<()> {
+    let (_, rel) = content::store_content(&artifact.content)?;
+    ctx.report_content_paths.insert(artifact.hash.clone(), rel);
+    Ok(())
+}
+
 fn service_id(asset_id: &str, port: u16, protocol: &str) -> String {
     sha256_hex(&format!("service:{}:{}:{}", asset_id, port, protocol))
 }
@@ -630,12 +621,11 @@ fn push_endpoint(metadata: &mut Value, url: &str) {
 // ---------------------------------------------------------------------------
 
 struct BuildContext {
-    run_id: String,
     assets: HashMap<String, Asset>,
     services: HashMap<String, Service>,
     findings: HashMap<String, Finding>,
-    relationships: Vec<Relationship>,
-    reports: Vec<Report>,
+    /// artifact hash -> content-store relative path of the stored report.
+    report_content_paths: HashMap<String, String>,
     has_vulnmalper_json: bool,
 }
 
@@ -703,15 +693,6 @@ fn import_netmalper(artifact: &Artifact, ctx: &mut BuildContext) -> Result<()> {
                                     asset.reverse_dns = Some(reverse_dns.to_string());
                                 }
                             }
-                            ctx.relationships.push(Relationship::new(
-                                &ctx.run_id,
-                                "asset",
-                                &root_id,
-                                "asset",
-                                &asset.stable_id,
-                                "resolves_to",
-                                &format!("{} resolves to {}", target, ip),
-                            ));
                         }
                     } else if let Some(asset) = ctx.assets.get_mut(&root_id) {
                         asset.ip = Some(ip.to_string());
@@ -767,15 +748,6 @@ fn import_netmalper(artifact: &Artifact, ctx: &mut BuildContext) -> Result<()> {
                             }
                         }
                     }
-                    ctx.relationships.push(Relationship::new(
-                        &ctx.run_id,
-                        "asset",
-                        &asset_id,
-                        "service",
-                        &key,
-                        "hosts",
-                        &format!("hosts {} service on port {}", service_name, port),
-                    ));
                 }
             }
             "endpoint" => {
@@ -821,7 +793,11 @@ fn import_netmalper(artifact: &Artifact, ctx: &mut BuildContext) -> Result<()> {
                 let mut finding =
                     Finding::new(&asset_id, &format!("nmap/{}", script_id), script_id);
                 finding.severity = "info".to_string();
-                finding.detail = Some(truncate(output, 4096));
+                if !output.is_empty() {
+                    let (detail, detail_path) = content::store_or_excerpt(output)?;
+                    finding.detail = Some(detail);
+                    finding.detail_path = detail_path;
+                }
                 let protocol = "tcp";
                 ctx.ensure_service(&asset_id, port, protocol, "unknown");
                 let service_key = service_id(&asset_id, port, protocol);
@@ -831,17 +807,7 @@ fn import_netmalper(artifact: &Artifact, ctx: &mut BuildContext) -> Result<()> {
                         service.banner = Some(truncate(output, 2048));
                     }
                 }
-                let finding_id = finding.stable_id.clone();
                 ctx.findings.insert(finding.stable_id.clone(), finding);
-                ctx.relationships.push(Relationship::new(
-                    &ctx.run_id,
-                    "service",
-                    &service_key,
-                    "finding",
-                    &finding_id,
-                    "affected_by",
-                    &format!("{} finding on port {}", script_id, port),
-                ));
             }
             _ => {}
         }
@@ -982,7 +948,13 @@ fn import_vulnmalper_json(artifact: &Artifact, ctx: &mut BuildContext) -> Result
             finding.detail = fobj
                 .get("detail")
                 .and_then(Value::as_str)
-                .map(|s| truncate(s, 4096));
+                .filter(|s| !s.is_empty())
+                .map(content::store_or_excerpt)
+                .transpose()?
+                .map(|(detail, detail_path)| {
+                    finding.detail_path = detail_path;
+                    detail
+                });
             finding.reference = fobj
                 .get("reference")
                 .and_then(Value::as_str)
@@ -992,17 +964,7 @@ fn import_vulnmalper_json(artifact: &Artifact, ctx: &mut BuildContext) -> Result
             if !url.is_empty() {
                 finding.endpoints.push(url.clone());
             }
-            let finding_id = finding.stable_id.clone();
             ctx.findings.insert(finding.stable_id.clone(), finding);
-            ctx.relationships.push(Relationship::new(
-                &ctx.run_id,
-                "service",
-                &service_key,
-                "finding",
-                &finding_id,
-                "affected_by",
-                &format!("{} finding by {}", title, tool),
-            ));
         }
     }
 
@@ -1010,16 +972,8 @@ fn import_vulnmalper_json(artifact: &Artifact, ctx: &mut BuildContext) -> Result
 }
 
 fn import_vulnmalper_markdown(artifact: &Artifact, ctx: &mut BuildContext) -> Result<()> {
-    // Always store the report itself.
-    ctx.reports.push(Report::new(
-        &ctx.run_id,
-        "vulnmalper",
-        "markdown",
-        "VulnMalper Report",
-        &artifact.path.display().to_string(),
-        &artifact.content,
-        &artifact.hash,
-    ));
+    // Always store the report content as a file.
+    store_report(ctx, artifact)?;
 
     // If a VulnMalper JSON export is present, use it as the structured source.
     if ctx.has_vulnmalper_json {
@@ -1092,32 +1046,15 @@ fn import_vulnmalper_markdown(artifact: &Artifact, ctx: &mut BuildContext) -> Re
             finding.target_url = Some(current_url.clone());
             finding.endpoints.push(current_url.clone());
         }
-        let finding_id = finding.stable_id.clone();
         ctx.findings.insert(finding.stable_id.clone(), finding);
-        ctx.relationships.push(Relationship::new(
-            &ctx.run_id,
-            "asset",
-            &asset_id,
-            "finding",
-            &finding_id,
-            "exhibits",
-            &format!("{} finding", title),
-        ));
     }
 
     Ok(())
 }
 
 fn import_ploitmalper_report(artifact: &Artifact, ctx: &mut BuildContext) -> Result<()> {
-    ctx.reports.push(Report::new(
-        &ctx.run_id,
-        "ploitmalper",
-        "markdown",
-        "PloitMalper - Vulnerability Analysis Report",
-        &artifact.path.display().to_string(),
-        &artifact.content,
-        &artifact.hash,
-    ));
+    // Store the full report content as a file.
+    store_report(ctx, artifact)?;
 
     let target = artifact
         .content
@@ -1466,6 +1403,7 @@ fn diff_finding(old: &Finding, new: &Finding) -> Vec<ObsSpec> {
     }
     if old.title != new.title
         || old.detail != new.detail
+        || old.detail_path != new.detail_path
         || old.reference != new.reference
         || old.target_url != new.target_url
     {
@@ -1474,12 +1412,14 @@ fn diff_finding(old: &Finding, new: &Finding) -> Vec<ObsSpec> {
             before: json!({
                 "title": old.title,
                 "detail": old.detail,
+                "detail_path": old.detail_path,
                 "reference": old.reference,
                 "target_url": old.target_url,
             }),
             after: json!({
                 "title": new.title,
                 "detail": new.detail,
+                "detail_path": new.detail_path,
                 "reference": new.reference,
                 "target_url": new.target_url,
             }),
