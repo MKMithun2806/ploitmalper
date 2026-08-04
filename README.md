@@ -18,7 +18,6 @@
 - **Automated Module Suggestions**: Analyzes service banners and titles against an internal expert system to suggest relevant Metasploit modules.
 - **Payload Recipe Builder**: Generates ready-to-use `msfvenom` commands for various platforms (Windows, Linux, macOS, etc.).
 - **Flexible Reporting**: Produces clean, professional Markdown reports with summary tables and deep-dive findings.
-- **Instant Sharing**: Includes a built-in temporary file server to share reports across a network instantly.
 - **Intelligence Database**: Stores assets, services, findings, and observations from Malper scan artifacts in PocketBase or SQLite, with re-ingest deduplication and change tracking.
 - **History & Diffing**: Explore per-asset timelines and compare scan runs to see what was newly discovered, removed, or changed.
 
@@ -93,12 +92,6 @@ Feed in a JSON scan file (e.g., from VulnMalper) to deduplicate and enrich:
 ploit-malper process results.json
 ```
 
-### 6. Share Your Report
-Host the generated `report.md` on a temporary local server:
-```bash
-ploit-malper share --port 8888
-```
-
 ---
 
 ## Command Reference
@@ -115,7 +108,6 @@ ploit-malper share --port 8888
 | `runs` | List all recorded scan runs. |
 | `diff [run-a] [run-b]` | Compare two scan runs (defaults to the two most recent). |
 | `setup` | Interactive wizard for MSF-RPC and NVD API configuration. |
-| `share` | Start a temporary web server to serve reports (`-p` for port, `-d` for dir). |
 | `reset-config` | Wipe all stored credentials and local cache. |
 
 Run `ploit-malper` (or `ploit-malper --help`) for a summary of all commands.

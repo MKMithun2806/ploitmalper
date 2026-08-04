@@ -2,8 +2,6 @@ use std::collections::HashSet;
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
 
 use crate::config::ConfigManager;
 use crate::db::Storage;
@@ -13,7 +11,6 @@ use crate::models::{DedupStats, ModuleSuggestion, PayloadRecipe};
 use crate::nvd::{EnrichmentStats, NVDClient};
 use crate::recipe;
 use crate::report;
-use crate::share;
 
 pub fn main() {
     if let Err(err) = run() {
@@ -35,9 +32,6 @@ pub fn run() -> Result<()> {
     match args[0].as_str() {
         "process" => {
             cmd_process(&args[1..], &mut config_mgr, config_loaded)?;
-        }
-        "share" => {
-            cmd_share(&args[1..])?;
         }
         "reset-config" => {
             cmd_reset_config(&mut config_mgr)?;
@@ -350,50 +344,6 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
     Ok(())
 }
 
-fn cmd_share(args: &[String]) -> Result<()> {
-    let mut directory = PathBuf::from(".");
-    let mut port = 8888u16;
-
-    let mut index = 0usize;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--directory" | "-d" => {
-                if let Some(value) = args.get(index + 1) {
-                    directory = PathBuf::from(value);
-                    index += 2;
-                    continue;
-                }
-            }
-            "--port" | "-p" => {
-                if let Some(value) = args.get(index + 1) {
-                    port = value
-                        .parse::<u16>()
-                        .map_err(|_| AppError::Message(format!("Invalid port value: {}", value)))?;
-                    index += 2;
-                    continue;
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-
-    println!("[+] Starting file server in: {}", directory.display());
-    println!("[+] Port: {}", port);
-    println!();
-
-    let (server, actual_port) = share::start_file_server(directory, port)?;
-    println!(
-        "File server running at http://0.0.0.0:{} (press Ctrl+C to stop)",
-        actual_port
-    );
-
-    let _server = server;
-    loop {
-        thread::sleep(Duration::from_secs(1));
-    }
-}
-
 fn cmd_reset_config(config_mgr: &mut ConfigManager) -> Result<()> {
     println!("[?] Resetting all stored configuration...");
     config_mgr.reset()?;
@@ -700,7 +650,6 @@ fn print_banner() {
     println!("  runs             List all scan runs");
     println!("  diff [a] [b]     Compare two scan runs (latest two by default)");
     println!("  exploit <run_id>  Plan and run exploits from a scan run against a framework");
-    println!("  share            Start temporary file server");
     println!("  setup            Configure MSF-RPC and NVD API credentials");
     println!("  reset-config     Reset stored configuration");
     println!();

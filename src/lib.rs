@@ -15,4 +15,3 @@ pub mod msgpack;
 pub mod nvd;
 pub mod recipe;
 pub mod report;
-pub mod share;
