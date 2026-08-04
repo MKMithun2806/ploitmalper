@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::analyze::{
@@ -602,6 +602,22 @@ fn title_case(value: &str) -> String {
         .join(" ")
 }
 
+/// Derive the markdown report output path from a scan JSON input path.
+/// `results/scan.json` becomes `results/scan_ploitmalper.md` in the same
+/// directory as the input.
+pub fn derive_report_path(input_path: &Path) -> PathBuf {
+    let stem = input_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "report".to_string());
+    let directory = input_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    directory.join(format!("{}_ploitmalper.md", stem))
+}
+
 pub fn generate_markdown_report(
     records: &[ScanRecord],
     injectable: &[InjectableEndpoint],
@@ -613,7 +629,7 @@ pub fn generate_markdown_report(
     let mut lines = Vec::new();
     let has_nvd = records.iter().any(|record| record.nvd_cvss_v3.is_some());
 
-    lines.push("# PloitMalper - Intelligence Analysis Report".to_string());
+    lines.push("# PloitMalper - Vulnerability Analysis Report".to_string());
     lines.push(String::new());
     lines.push(format!(
         "**Generated:** {}",
@@ -1221,6 +1237,23 @@ mod tests {
         assert!(content.contains("## 9. Attack Chain"));
         assert!(content.contains("## 11. Raw Evidence"));
         assert!(content.contains("/search?q="));
+        assert!(content.contains("# PloitMalper - Vulnerability Analysis Report"));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn report_path_is_derived_from_input() {
+        assert_eq!(
+            derive_report_path(&PathBuf::from("results/scan.json")),
+            PathBuf::from("results/scan_ploitmalper.md")
+        );
+        assert_eq!(
+            derive_report_path(&PathBuf::from("/tmp/data/scan.json")),
+            PathBuf::from("/tmp/data/scan_ploitmalper.md")
+        );
+        assert_eq!(
+            derive_report_path(&PathBuf::from("scan.json")),
+            PathBuf::from("scan_ploitmalper.md")
+        );
     }
 }

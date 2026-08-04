@@ -320,14 +320,18 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
         recipes.push(recipe);
     }
 
-    if prompt_bool_with_default("\nWrite findings to Markdown report (report.md)?", true)? {
+    let report_path = report::derive_report_path(&input_path);
+    if prompt_bool_with_default(
+        &format!("\nWrite findings to Markdown report ({})?", report_path.display()),
+        true,
+    )? {
         let output_path = report::generate_markdown_report(
             &records,
             &injectable,
             &all_suggestions,
             &recipes,
             &dedup_stats,
-            "report.md",
+            report_path.to_str().unwrap_or("report.md"),
         )?;
         println!();
         println!("[+] Report written to: {}", output_path.display());
