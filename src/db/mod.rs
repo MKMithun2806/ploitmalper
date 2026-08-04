@@ -49,6 +49,10 @@ pub trait Storage: Send {
     fn upsert_scan_run(&mut self, run: &ScanRun) -> Result<()>;
     fn get_scan_run(&mut self, run_id: &str) -> Result<Option<ScanRun>>;
     fn list_scan_runs(&mut self) -> Result<Vec<ScanRun>>;
+    /// Delete a scan run and the records owned by it (observations and
+    /// exploit executions). Assets, services and findings are shared across
+    /// runs and are left untouched.
+    fn delete_scan_run(&mut self, run_id: &str) -> Result<()>;
 
     // --- Assets ---------------------------------------------------------
 

@@ -342,6 +342,20 @@ impl Storage for SqliteStorage {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    fn delete_scan_run(&mut self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM ExploitExecutions WHERE run_id = ?1",
+            params![run_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM Observations WHERE run_id = ?1",
+            params![run_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM ScanRuns WHERE stable_id = ?1", params![run_id])?;
+        Ok(())
+    }
+
     fn upsert_asset(&mut self, asset: &Asset) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO Assets (stable_id, asset_type, name, ip, fqdn, reverse_dns, first_seen, last_seen, status, metadata)

@@ -61,6 +61,9 @@ pub fn run() -> Result<()> {
         "diff" => {
             crate::frontend::diff::cmd_diff(&args[1..], &mut config_mgr)?;
         }
+        "del" => {
+            cmd_del(&args[1..], &mut config_mgr)?;
+        }
         "exploit" => {
             crate::exploit::cli::cmd_exploit(&args[1..], &mut config_mgr)?;
         }
@@ -242,7 +245,10 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
 
     let report_path = report::derive_report_path(&input_path);
     if prompt_bool_with_default(
-        &format!("\nWrite findings to Markdown report ({})?", report_path.display()),
+        &format!(
+            "\nWrite findings to Markdown report ({})?",
+            report_path.display()
+        ),
         true,
     )? {
         let output_path = report::generate_markdown_report(
@@ -441,8 +447,7 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
     }
 
     if opts.process && !opts.dry_run {
-        let processed =
-            crate::process::process_folder(&folder, config_mgr, opts.verbose)?;
+        let processed = crate::process::process_folder(&folder, config_mgr, opts.verbose)?;
         println!(
             "[+] Pre-processed {} VulnMalper JSON file(s) into PloitMalper reports.",
             processed
@@ -469,6 +474,44 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
     println!("    services:      {}", summary.services);
     println!("    findings:      {}", summary.findings);
     println!("    observations:  {}", summary.observations);
+    Ok(())
+}
+
+fn cmd_del(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
+    let parsed = crate::frontend::Args::parse(args)?;
+    if parsed.has("help") {
+        println!(
+            "Usage: ploit-malper del <run_id> [--yes] [--backend pocketbase|sqlite] \
+             [--pocketbase-url URL] [--sqlite-path PATH]"
+        );
+        return Ok(());
+    }
+
+    let run_ref = parsed.positionals().first().cloned().ok_or_else(|| {
+        AppError::Message("del requires a run id (e.g. ploit-malper del <run_id>)".to_string())
+    })?;
+
+    let mut storage = crate::frontend::open_backend(config_mgr, &parsed)?;
+    let run = crate::exploit::planner::Planner::resolve_run(storage.as_mut(), &run_ref)?;
+
+    println!(
+        "[+] Run: {} (target={})",
+        crate::frontend::truncate(&run.stable_id, 16),
+        run.target
+    );
+
+    let confirmed = parsed.has("yes")
+        || prompt_bool_with_default(
+            &format!("Delete run '{}' and its observations?", run.stable_id),
+            false,
+        )?;
+    if !confirmed {
+        println!("[!] Aborted.");
+        return Ok(());
+    }
+
+    storage.delete_scan_run(&run.stable_id)?;
+    println!("[+] Deleted run {} (target={}).", run.stable_id, run.target);
     Ok(())
 }
 
@@ -571,6 +614,7 @@ fn print_banner() {
     println!("  runs             List all scan runs");
     println!("  diff [a] [b]     Compare two scan runs (latest two by default)");
     println!("  exploit <run_id>  Plan and run exploits from a scan run against a framework");
+    println!("  del <run_id>      Delete a scan run and its observations");
     println!("  setup            Configure MSF-RPC and NVD API credentials");
     println!("  reset-config     Reset stored configuration");
     println!();

@@ -591,6 +591,35 @@ impl PocketBaseStorage {
         Ok(())
     }
 
+    fn delete_record_by_id(&mut self, collection: &str, record_id: &str) -> Result<()> {
+        let token = self.ensure_token()?;
+        let url = format!(
+            "{}/api/collections/{}/records/{}",
+            self.base_url(),
+            collection,
+            record_id
+        );
+        let resp = curl_request("DELETE", &url, Some(&token), None, &[])?;
+        if resp.status != 200 && resp.status != 204 {
+            return Err(AppError::Network(format!(
+                "Failed to delete record in '{}' (HTTP {}): {}",
+                collection, resp.status, resp.body
+            )));
+        }
+        Ok(())
+    }
+
+    fn delete_records_by_filter(&mut self, collection: &str, filter: &str) -> Result<()> {
+        let records = self.list_records(collection, Some(filter))?;
+        for record in &records {
+            let record_id = get_str(record, "id");
+            if !record_id.is_empty() {
+                self.delete_record_by_id(collection, &record_id)?;
+            }
+        }
+        Ok(())
+    }
+
     fn upsert(&mut self, collection: &str, stable_id: &str, record: &Value) -> Result<()> {
         if let Some((record_id, _)) = self.find_record(collection, stable_id)? {
             self.update_record(collection, &record_id, record)
@@ -727,6 +756,17 @@ impl Storage for PocketBaseStorage {
     fn list_scan_runs(&mut self) -> Result<Vec<ScanRun>> {
         let records = self.list_records(collections::SCAN_RUNS, None)?;
         Ok(records.iter().map(record_to_scan_run).collect())
+    }
+
+    fn delete_scan_run(&mut self, run_id: &str) -> Result<()> {
+        let obs_filter = format!("run_id = \"{}\"", run_id);
+        self.delete_records_by_filter(collections::OBSERVATIONS, &obs_filter)?;
+        let exec_filter = format!("run_id = \"{}\"", run_id);
+        self.delete_records_by_filter(collections::EXPLOIT_EXECUTIONS, &exec_filter)?;
+        if let Some((record_id, _)) = self.find_record(collections::SCAN_RUNS, run_id)? {
+            self.delete_record_by_id(collections::SCAN_RUNS, &record_id)?;
+        }
+        Ok(())
     }
 
     fn upsert_asset(&mut self, asset: &Asset) -> Result<()> {

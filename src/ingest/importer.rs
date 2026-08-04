@@ -1738,7 +1738,9 @@ mod tests {
         let findings = storage.list_all_findings().unwrap();
         let titles: Vec<String> = findings.iter().map(|f| f.title.clone()).collect();
         assert!(
-            titles.iter().any(|t| t.contains("Injectable endpoint: http://192.168.1.2?name=1")),
+            titles
+                .iter()
+                .any(|t| t.contains("Injectable endpoint: http://192.168.1.2?name=1")),
             "injectable finding missing from db: {:?}",
             titles
         );

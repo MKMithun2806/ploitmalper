@@ -115,6 +115,7 @@ ploit-malper process results.json
 | `history <id>` | Show the observation timeline for an asset, service, or finding. |
 | `runs` | List all recorded scan runs. |
 | `diff [run-a] [run-b]` | Compare two scan runs (defaults to the two most recent). |
+| `del <run_id>` | Delete a scan run and its observations and exploit executions. |
 | `setup` | Interactive wizard for MSF-RPC and NVD API configuration. |
 | `reset-config` | Wipe all stored credentials and local cache. |
 
@@ -235,6 +236,15 @@ ploit-malper diff --json
 ```
 
 Compares the newer run against the older one and reports **added** / **removed** / **changed** records with per-type counts. `--verbose` shows the before/after value diff for every changed record; `--json` emits the full structured diff.
+
+### del
+
+```bash
+ploit-malper del <run_id>        # prompts for confirmation
+ploit-malper del <run_id> --yes  # skip the confirmation prompt
+```
+
+Deletes a scan run (matched by full id or unique prefix) together with the observations and exploit executions recorded under it. Assets, services, and findings are shared across runs and are left untouched. Use `ploit-malper runs` to list run ids first.
 
 ---
 

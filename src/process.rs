@@ -144,10 +144,7 @@ pub fn process_scan_file(
     if all_suggestions.is_empty() {
         println!("[?] No module suggestions for detected services or CVEs.");
     } else {
-        println!(
-            "[+] {} module suggestion(s) found:",
-            all_suggestions.len()
-        );
+        println!("[+] {} module suggestion(s) found:", all_suggestions.len());
         for suggestion in &all_suggestions {
             println!(
                 "    {} (confidence: {})",
