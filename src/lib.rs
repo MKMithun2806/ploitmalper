@@ -13,5 +13,6 @@ pub mod models;
 pub mod msf;
 pub mod msgpack;
 pub mod nvd;
+pub mod process;
 pub mod recipe;
 pub mod report;

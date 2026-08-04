@@ -78,6 +78,14 @@ Import a Malper scan output folder (NetMalper/VulnMalper/PloitMalper):
 ploit-malper ingest ./results
 ```
 
+Use `--process` (`-p`) to first run every VulnMalper JSON in the folder through
+the PloitMalper pipeline and write a fresh PloitMalper report next to it, so the
+intelligence database always ingests the analyzed report (including flagged
+injectable endpoints like SQLi):
+```bash
+ploit-malper ingest ./results --process
+```
+
 ### 4. Explore and Compare
 ```bash
 ploit-malper assets                 # list assets
@@ -100,7 +108,7 @@ ploit-malper process results.json
 | :--- | :--- |
 | `process <file>` | Parse, deduplicate, and enrich scan results. |
 | `db_setup` | Configure the intelligence database (PocketBase or SQLite) and create the schema. |
-| `ingest <folder>` | Import Malper scan artifacts into the intelligence database. |
+| `ingest <folder>` | Import Malper scan artifacts into the intelligence database (`-p/--process` to pre-process VulnMalper JSONs first). |
 | `assets` | List assets with lifecycle state and service summary. |
 | `services` | List discovered services across assets. |
 | `findings` | List vulnerability findings. |

@@ -20,6 +20,9 @@ pub struct IngestOptions {
     pub verbose: bool,
     pub dry_run: bool,
     pub force: bool,
+    /// Run the `process` pipeline over every VulnMalper JSON in the folder
+    /// and write a fresh PloitMalper report next to it before ingesting.
+    pub process: bool,
     /// Backend override: "auto" uses the persisted config.
     pub backend: String,
     pub pocketbase_url: Option<String>,
@@ -32,6 +35,7 @@ impl Default for IngestOptions {
             verbose: false,
             dry_run: false,
             force: false,
+            process: false,
             backend: "auto".to_string(),
             pocketbase_url: None,
             sqlite_path: None,
@@ -1093,7 +1097,58 @@ fn import_ploitmalper_report(artifact: &Artifact, ctx: &mut BuildContext) -> Res
         }
     }
 
+    // Surface every injectable endpoint the report flags (e.g. SQLi) as a
+    // finding so it lands in the intelligence database.
+    for finding in injectable_findings(&artifact.content, &asset_id) {
+        ctx.findings.insert(finding.stable_id.clone(), finding);
+    }
+
     Ok(())
+}
+
+/// Extract the injectable endpoints table from a PloitMalper report and turn
+/// each flagged URL into a high-severity finding.
+fn injectable_findings(content: &str, asset_id: &str) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## 4. Injectable Endpoints") {
+            in_section = true;
+            continue;
+        }
+        if in_section && trimmed.starts_with("## ") {
+            break;
+        }
+        if !in_section || !trimmed.starts_with('|') {
+            continue;
+        }
+        let cells: Vec<&str> = trimmed.split('|').collect();
+        let endpoint_cell = match cells.get(2) {
+            Some(cell) => cell.trim(),
+            None => continue,
+        };
+        let endpoint = endpoint_cell.trim_matches('`').trim();
+        if endpoint.is_empty()
+            || endpoint == "Endpoint"
+            || endpoint.starts_with('-')
+            || !endpoint.starts_with("http")
+        {
+            continue;
+        }
+        let endpoint = endpoint.to_string();
+        let mut finding = Finding::new(
+            asset_id,
+            "ploitmalper",
+            &format!("Injectable endpoint: {}", endpoint),
+        );
+        finding.severity = "high".to_string();
+        finding.exploitability = Some("likely".to_string());
+        finding.target_url = Some(endpoint.clone());
+        finding.endpoints.push(endpoint);
+        findings.push(finding);
+    }
+    findings
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,6 +1538,7 @@ fn port_from_host_url(url: &str, fallback: Option<&Value>) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn target_compatibility() {
@@ -1562,5 +1618,134 @@ mod tests {
     fn severity_exploitability_map() {
         assert_eq!(exploitability_from_severity("critical"), "likely");
         assert_eq!(exploitability_from_severity("info"), "none");
+    }
+
+    #[test]
+    fn injectable_findings_extracted_from_report() {
+        let report = "# PloitMalper - Vulnerability Analysis Report\n\
+            \n\
+            **Generated:** 123\n\
+            **Tool Version:** 0.2.1\n\
+            \n\
+            ## 1. Executive Summary\n\
+            - **Host:** http://192.168.1.2/\n\
+            \n\
+            ## 4. Injectable Endpoints\n\
+            \n\
+            1 potential injection point(s) reported:\n\
+            \n\
+            | # | Endpoint | Affected Host |\n\
+            |---|----------|---------------|\n\
+            | 1 | `http://192.168.1.2?name=1` | http://192.168.1.2/ |\n\
+            \n\
+            ## 5. CVE Intelligence\n";
+        let findings = injectable_findings(report, "asset-1");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].asset_id, "asset-1");
+        assert_eq!(findings[0].tool, "ploitmalper");
+        assert_eq!(findings[0].severity, "high");
+        assert_eq!(findings[0].exploitability.as_deref(), Some("likely"));
+        assert_eq!(
+            findings[0].title,
+            "Injectable endpoint: http://192.168.1.2?name=1"
+        );
+        assert_eq!(findings[0].endpoints, vec!["http://192.168.1.2?name=1"]);
+        assert_eq!(
+            findings[0].target_url.as_deref(),
+            Some("http://192.168.1.2?name=1")
+        );
+    }
+
+    #[test]
+    fn injectable_findings_skips_header_and_absent_section() {
+        let no_injectable = "# PloitMalper - Vulnerability Analysis Report\n\
+            \n\
+            ## 4. Injectable Endpoints\n\
+            \n\
+            No injectable endpoints flagged by the scanner.\n\
+            \n\
+            ## 5. CVE Intelligence\n";
+        assert!(injectable_findings(no_injectable, "asset-1").is_empty());
+
+        let no_section = "# PloitMalper - Vulnerability Analysis Report\n\
+            ## 1. Executive Summary\n";
+        assert!(injectable_findings(no_section, "asset-1").is_empty());
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("ploitmalper_tests").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn ingest_process_pipeline_imports_injectable_findings() {
+        let dir = temp_dir("ingest_process");
+        let target = "192.168.1.2";
+        let finding = serde_json::json!({
+            "tool": "nikto",
+            "severity": "low",
+            "title": "Missing security header",
+            "target": format!("http://{}/", target),
+            "detail": "Suggested security header missing.",
+            "reference": ""
+        });
+        let json = serde_json::json!({
+            "vulnmalper": { "version": "8.0.0", "source_target": target },
+            "findings": [finding],
+            "hosts": [{
+                "host": target,
+                "url": format!("http://{}/", target),
+                "port": 80,
+                "scheme": "http",
+                "findings": [finding],
+                "injectable": [format!("http://{}?name=1", target)]
+            }]
+        });
+        let json_path = dir.join(format!("vulnmalper_{}.json", target));
+        std::fs::write(&json_path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let mut config_mgr = crate::config::ConfigManager::new();
+        let processed = crate::process::process_folder(&dir, &mut config_mgr, false).unwrap();
+        assert_eq!(processed, 1);
+
+        let report_path = dir.join(format!("vulnmalper_{}_ploitmalper.md", target));
+        let report = std::fs::read_to_string(&report_path).unwrap();
+        assert!(report.contains("# PloitMalper - Vulnerability Analysis Report"));
+        assert!(report.contains("http://192.168.1.2?name=1"));
+
+        let db_path = dir.join("test.db");
+        let db_cfg = crate::config::DatabaseConfig {
+            backend: "sqlite".to_string(),
+            sqlite_path: db_path.to_string_lossy().to_string(),
+            configured: true,
+            ..Default::default()
+        };
+        let opts = IngestOptions {
+            verbose: false,
+            dry_run: false,
+            force: false,
+            process: false,
+            backend: "auto".to_string(),
+            pocketbase_url: None,
+            sqlite_path: None,
+        };
+        let summary = ingest_folder(&dir, &db_cfg, &opts).unwrap();
+        assert!(summary.artifacts_accepted >= 2);
+
+        let mut storage = crate::db::open_storage_with(&db_cfg, "sqlite", None, None).unwrap();
+        let findings = storage.list_all_findings().unwrap();
+        let titles: Vec<String> = findings.iter().map(|f| f.title.clone()).collect();
+        assert!(
+            titles.iter().any(|t| t.contains("Injectable endpoint: http://192.168.1.2?name=1")),
+            "injectable finding missing from db: {:?}",
+            titles
+        );
+        assert!(titles.iter().any(|t| t.contains("Missing security header")));
+
+        let _ = PathBuf::from(&db_path);
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -126,7 +126,10 @@ offline work and CI.
 
 Every command honours `--backend pocketbase|sqlite`. `ingest` also accepts
 `--pocketbase-url` and `--sqlite-path` to target a specific instance without
-rewriting the saved config.
+rewriting the saved config. `ingest --process` (`-p`) first runs every VulnMalper
+JSON in the folder through the PloitMalper pipeline, writes a fresh PloitMalper
+report beside each JSON (and the ingestable report is then picked up), so the
+database always reflects the analyzed findings, including injectable endpoints.
 
 ## Idempotent Ingestion
 

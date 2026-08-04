@@ -1,14 +1,12 @@
-use std::collections::HashSet;
 use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 use crate::config::ConfigManager;
 use crate::db::Storage;
-use crate::engine::{dedup, matcher, msfrpc, parser};
+use crate::engine::msfrpc;
 use crate::error::{AppError, Result};
-use crate::models::{DedupStats, ModuleSuggestion, PayloadRecipe};
-use crate::nvd::{EnrichmentStats, NVDClient};
+use crate::models::PayloadRecipe;
 use crate::recipe;
 use crate::report;
 
@@ -117,7 +115,8 @@ fn cmd_setup(config_mgr: &mut ConfigManager) -> Result<()> {
 }
 
 fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: bool) -> Result<()> {
-    let input_file = match args.first() {
+    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
+    let input_file = match args.iter().find(|a| !a.starts_with('-')) {
         Some(path) => path,
         None => {
             eprintln!("[!] No input file specified. Use: ploit-malper process <scan.json>");
@@ -131,103 +130,15 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
         return Ok(());
     }
 
-    println!("[+] Loading scan results from: {}", input_path.display());
-    let raw_json = std::fs::read_to_string(&input_path)?;
-
-    println!("[+] Parsing with Rust engine...");
-    let mut parsed = parser::parse_vulnmalper_scan(&raw_json)?;
-    let injectable = parsed.injectable_endpoints.clone();
-    let raw_count = parsed.records.len();
-
-    println!(
-        "[+] Found {} raw findings ({} injectable endpoint{} flagged). Normalizing...",
-        raw_count,
-        injectable.len(),
-        if injectable.len() == 1 { "" } else { "s" }
-    );
-
-    // Extract CVEs from every field before deduplication.
-    for record in &mut parsed.records {
-        crate::cve::extract_into_record(record);
-    }
-    let discovered_cves: std::collections::BTreeSet<String> = parsed
-        .records
-        .iter()
-        .flat_map(|record| record.cves.iter().cloned())
-        .collect();
-    println!(
-        "[+] Discovered {} CVE id{}.",
-        discovered_cves.len(),
-        if discovered_cves.len() == 1 { "" } else { "s" }
-    );
-
-    let dedup_result = dedup::deduplicate_records(parsed.records);
-    let mut records = dedup_result.records;
-    let dedup_stats = DedupStats {
-        total: raw_count,
-        unique: dedup_result.unique_count,
-        removed: dedup_result.removed_count,
+    let process_opts = crate::process::ProcessOptions {
+        verbose,
+        print_console: true,
     };
-
-    println!(
-        "[+] Normalization + deduplication complete: {} unique, {} merged",
-        dedup_stats.unique, dedup_stats.removed
-    );
-    println!();
-
-    if config_mgr.is_nvd_configured() {
-        let nvd_cfg = config_mgr.get_nvd_config().clone();
-        let mut nvd_client = NVDClient::new(&nvd_cfg.api_key);
-        println!("[+] Enriching discovered CVEs via NVD API...");
-        let stats: EnrichmentStats = nvd_client.enrich_records(&mut records);
-        println!(
-            "[+] NVD enrichment complete: {} fetched, {} from cache, {} not found",
-            stats.fetched, stats.cache_hits, stats.not_found
-        );
-        println!();
-    }
-
-    let mut all_suggestions = Vec::<ModuleSuggestion>::new();
-    let mut seen_suggestions = HashSet::<(String, String)>::new();
-
-    println!("[+] Analyzing service banners, technologies and CVEs for module suggestions...");
-    for record in &records {
-        if let Some(service) = record.service.as_deref() {
-            for suggestion in matcher::suggest_modules(service) {
-                push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
-            }
-        }
-        if !record.title.is_empty() {
-            for suggestion in matcher::suggest_from_title(&record.title, &record.detail) {
-                push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
-            }
-        }
-        for cve in &record.cves {
-            for module in crate::msf::modules_for_cve(cve) {
-                let suggestion = ModuleSuggestion {
-                    service_banner: format!("cve:{}", cve),
-                    suggested_module: module.name.clone(),
-                    confidence: if module.rank == "excellent" || module.rank == "great" {
-                        "high".to_string()
-                    } else {
-                        "medium".to_string()
-                    },
-                };
-                push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
-            }
-        }
-    }
-
-    if all_suggestions.is_empty() {
-        println!("[?] No module suggestions for detected services or CVEs.");
-    }
-
-    println!();
-    println!(
-        "{}",
-        report::render_console_report(&records, &injectable, &all_suggestions, &[], &dedup_stats)
-    );
-    println!();
+    let processed = crate::process::process_scan_file(&input_path, config_mgr, &process_opts)?;
+    let records = processed.records;
+    let injectable = processed.injectable;
+    let all_suggestions = processed.suggestions;
+    let dedup_stats = processed.dedup_stats;
 
     let mut msf_connected = false;
     let mut msf_client = None;
@@ -463,6 +374,7 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
             "--verbose" | "-v" => opts.verbose = true,
             "--dry-run" => opts.dry_run = true,
             "--force" | "-f" => opts.force = true,
+            "--process" | "-p" => opts.process = true,
             "--backend" | "-b" => {
                 if let Some(value) = args.get(index + 1) {
                     if !["pocketbase", "sqlite", "auto"].contains(&value.as_str()) {
@@ -489,7 +401,7 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
             }
             "-h" | "--help" => {
                 println!(
-                    "Usage: ploit-malper ingest <folder> [--verbose] [--dry-run] [--force] \
+                    "Usage: ploit-malper ingest <folder> [--verbose] [--dry-run] [--force] [--process] \
                      [--backend pocketbase|sqlite|auto] [--pocketbase-url URL] [--sqlite-path PATH]"
                 );
                 return Ok(());
@@ -519,6 +431,16 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
         ));
     }
 
+    if opts.process && !opts.dry_run {
+        let processed =
+            crate::process::process_folder(&folder, config_mgr, opts.verbose)?;
+        println!(
+            "[+] Pre-processed {} VulnMalper JSON file(s) into PloitMalper reports.",
+            processed
+        );
+        println!();
+    }
+
     let summary =
         crate::ingest::importer::ingest_folder(&folder, config_mgr.get_database_config(), &opts)?;
 
@@ -539,20 +461,6 @@ fn cmd_ingest(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
     println!("    findings:      {}", summary.findings);
     println!("    observations:  {}", summary.observations);
     Ok(())
-}
-
-fn push_unique_suggestion(
-    suggestions: &mut Vec<ModuleSuggestion>,
-    seen: &mut HashSet<(String, String)>,
-    suggestion: ModuleSuggestion,
-) {
-    let key = (
-        suggestion.service_banner.clone(),
-        suggestion.suggested_module.clone(),
-    );
-    if seen.insert(key) {
-        suggestions.push(suggestion);
-    }
 }
 
 fn prompt_text(prompt: &str, default: &str) -> Result<String> {
