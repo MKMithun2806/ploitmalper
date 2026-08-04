@@ -29,7 +29,7 @@
 PloitMalper leverages system utilities for lightweight HTTP transport:
 
 - **Rust 1.70+**
-- **curl**: Used for NVD API and MSF-RPC communication.
+- **curl**: Used for MSF-RPC and PocketBase communication.
 - **Metasploit Framework** (Recommended, for MSF-RPC integration).
 - **PocketBase** (Optional, for the remote intelligence database backend).
 

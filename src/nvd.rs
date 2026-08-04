@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs;
-use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
@@ -65,42 +64,50 @@ impl NVDClient {
 
     fn fetch_cve(&self, cve_id: &str, use_key: bool) -> std::result::Result<Value, String> {
         let url = format!("{}?cveId={}", NVD_API_BASE, cve_id);
-        let mut command = Command::new("curl");
-        command
-            .arg("-sS")
-            .arg("--fail")
-            .arg("--max-time")
-            .arg("15")
-            .arg("-H")
-            .arg("User-Agent: PloitMalper/0.1.0");
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(format!("PloitMalper/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| e.to_string())?;
 
-        if use_key && !self.api_key.is_empty() {
-            command.arg("-H").arg(format!("apiKey: {}", self.api_key));
-        }
-
-        let output = command.arg(&url).output().map_err(|e| e.to_string())?;
-
-        if output.status.success() {
-            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
-        } else if output.status.code() == Some(22) && use_key && !self.api_key.is_empty() {
-            let fallback = Command::new("curl")
-                .arg("-sS")
-                .arg("--fail")
-                .arg("--max-time")
-                .arg("15")
-                .arg("-H")
-                .arg("User-Agent: PloitMalper/0.1.0")
-                .arg(&url)
-                .output()
-                .map_err(|e| e.to_string())?;
-            if fallback.status.success() {
-                serde_json::from_slice(&fallback.stdout).map_err(|e| e.to_string())
-            } else {
-                Err(String::from_utf8_lossy(&fallback.stderr).trim().to_string())
+        let get = |client: &reqwest::blocking::Client, key: Option<&str>| {
+            let mut request = client.get(&url);
+            if let Some(key) = key {
+                request = request.header("apiKey", key);
             }
+            request
+        };
+
+        let key = if use_key && !self.api_key.is_empty() {
+            Some(self.api_key.as_str())
         } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+            None
+        };
+
+        let first = get(&client, key).send().map_err(|e| e.to_string())?;
+        if first.status().is_success() {
+            return first.json().map_err(|e| e.to_string());
         }
+
+        // Retry without the API key when the authenticated request was
+        // rejected (invalid/expired key), mirroring the old curl fallback.
+        if key.is_some() {
+            let fallback = get(&client, None).send().map_err(|e| e.to_string())?;
+            if fallback.status().is_success() {
+                return fallback.json().map_err(|e| e.to_string());
+            }
+            return Err(format!(
+                "NVD request failed with HTTP {}: {}",
+                fallback.status(),
+                fallback.text().unwrap_or_default()
+            ));
+        }
+
+        Err(format!(
+            "NVD request failed with HTTP {}: {}",
+            first.status(),
+            first.text().unwrap_or_default()
+        ))
     }
 
     pub fn lookup_cve(&mut self, cve_id: &str) -> Option<NVDCVEInfo> {
