@@ -172,6 +172,9 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
                 msf_cfg.host, msf_cfg.port
             );
 
+            if verbose {
+                println!("[dbg] fetching available workspaces...");
+            }
             let ws_result = client.get_workspaces()?;
             if !ws_result.workspaces.is_empty() {
                 println!();
@@ -190,6 +193,12 @@ fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: b
 
             for record in records.iter().take(5) {
                 if let Some(target) = record.target.as_str().split_whitespace().next() {
+                    if verbose {
+                        println!(
+                            "[dbg] checking host {} against workspace '{}'...",
+                            target, msf_cfg.workspace
+                        );
+                    }
                     let check_result =
                         client.check_host_exists(target, Some(&msf_cfg.workspace))?;
                     if check_result.exists {

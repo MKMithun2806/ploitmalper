@@ -319,9 +319,6 @@ fn send_request(
 
     // Split headers from body (curl -i includes headers in stdout)
     let body = if let Some(pos) = find_header_body_boundary(stdout) {
-        let header_part = String::from_utf8_lossy(&stdout[..pos]);
-        let status_line = header_part.lines().next().unwrap_or("unknown");
-        eprintln!("[MSF-RPC] HTTP {status_line}");
         &stdout[pos..]
     } else {
         &stdout[..]
