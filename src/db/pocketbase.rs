@@ -11,6 +11,85 @@ use crate::error::{AppError, Result};
 
 const REQUEST_TIMEOUT_S: u64 = 60;
 
+// The PocketBase layer prints request-level diagnostics (collection, filter,
+// sort, expand, params, response body, backtrace) when `--verbose` is on;
+// normal output stays concise. The flag is stored in a thread-local because
+// the storage layer has no other channel to the CLI flags.
+thread_local! {
+    static VERBOSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn set_verbose(verbose: bool) {
+    VERBOSE.with(|cell| cell.set(verbose));
+}
+
+fn is_verbose() -> bool {
+    VERBOSE.with(|cell| cell.get())
+}
+
+/// Build the `AppError::Network` payload for a failed request. In normal mode
+/// the message stays concise; in `--verbose` mode it is expanded with the full
+/// request context (collection, filter, sort, expand, parameters, response
+/// body) and a captured backtrace.
+fn http_error(
+    action: &str,
+    collection: &str,
+    status: u16,
+    body: &Value,
+    url: &str,
+    query: &[(&str, &str)],
+) -> AppError {
+    let concise = format!(
+        "Failed to {action} in '{}' (HTTP {}): {}",
+        collection, status, body
+    );
+    if !is_verbose() {
+        return AppError::Network(concise);
+    }
+    let mut detail = format!("Failed to {action} in '{collection}' (HTTP {status})");
+    detail.push_str("\n  url: ");
+    detail.push_str(url);
+    let mut params: Vec<String> = Vec::new();
+    let mut filter = String::new();
+    let mut sort = String::new();
+    let mut expand = String::new();
+    for (k, v) in query {
+        match *k {
+            "filter" => filter.push_str(v),
+            "sort" => sort.push_str(v),
+            "expand" => expand.push_str(v),
+            _ => params.push(format!("{}={}", k, v)),
+        }
+    }
+    if !filter.is_empty() {
+        detail.push_str(&format!("\n  filter: {filter}"));
+    }
+    if !sort.is_empty() {
+        detail.push_str(&format!("\n  sort: {sort}"));
+    }
+    if !expand.is_empty() {
+        detail.push_str(&format!("\n  expand: {expand}"));
+    }
+    if !params.is_empty() {
+        detail.push_str(&format!("\n  request params: {}", params.join("&")));
+    }
+    detail.push_str(&format!("\n  response body: {body}"));
+    detail.push_str("\n  backtrace:\n");
+    detail.push_str(&std::backtrace::Backtrace::force_capture().to_string());
+    AppError::Network(detail)
+}
+
+/// The stable, content-derived unique key field for a collection. Most
+/// collections key on `stable_id`, but the `ExploitExecutions` schema keys on
+/// `execution_id` (no `stable_id` column exists on that collection).
+fn id_field_for(collection: &str) -> &'static str {
+    if collection == collections::EXPLOIT_EXECUTIONS {
+        "execution_id"
+    } else {
+        "stable_id"
+    }
+}
+
 /// PocketBase storage backend. Talks to the PocketBase REST API over `curl`
 /// (matching the rest of PloitMalper's lightweight HTTP transport) and uses
 /// `pbctl` for declarative schema management when available.
@@ -505,12 +584,17 @@ impl PocketBaseStorage {
     pub fn list_collection_names(&mut self) -> Result<Vec<String>> {
         let token = self.ensure_token()?;
         let url = format!("{}/api/collections", self.base_url());
-        let resp = curl_request("GET", &url, Some(&token), None, &[("perPage", "200")])?;
+        let query: &[(&str, &str)] = &[("perPage", "200")];
+        let resp = curl_request("GET", &url, Some(&token), None, query)?;
         if resp.status != 200 {
-            return Err(AppError::Network(format!(
-                "Failed to list PocketBase collections (HTTP {}): {}",
-                resp.status, resp.body
-            )));
+            return Err(http_error(
+                "list PocketBase collections",
+                "",
+                resp.status,
+                &resp.body,
+                &url,
+                query,
+            ));
         }
         let names = resp
             .body
@@ -533,7 +617,8 @@ impl PocketBaseStorage {
     ) -> Result<Option<(String, Value)>> {
         let token = self.ensure_token()?;
         let url = format!("{}/api/collections/{}/records", self.base_url(), collection);
-        let filter = format!("stable_id = \"{}\"", stable_id);
+        let filter_field = id_field_for(collection);
+        let filter = format!("{} = \"{}\"", filter_field, stable_id);
         let resp = curl_request(
             "GET",
             &url,
@@ -542,10 +627,14 @@ impl PocketBaseStorage {
             &[("filter", &filter), ("perPage", "500")],
         )?;
         if resp.status != 200 {
-            return Err(AppError::Network(format!(
-                "Failed to query records in '{}' (HTTP {}): {}",
-                collection, resp.status, resp.body
-            )));
+            return Err(http_error(
+                "query records",
+                collection,
+                resp.status,
+                &resp.body,
+                &url,
+                &[("filter", &filter), ("perPage", "500")],
+            ));
         }
         let items = resp
             .body
@@ -565,10 +654,14 @@ impl PocketBaseStorage {
         let url = format!("{}/api/collections/{}/records", self.base_url(), collection);
         let resp = curl_request("POST", &url, Some(&token), Some(record), &[])?;
         if resp.status != 200 && resp.status != 201 {
-            return Err(AppError::Network(format!(
-                "Failed to create record in '{}' (HTTP {}): {}",
-                collection, resp.status, resp.body
-            )));
+            return Err(http_error(
+                "create record in",
+                collection,
+                resp.status,
+                &resp.body,
+                &url,
+                &[],
+            ));
         }
         Ok(())
     }
@@ -583,10 +676,14 @@ impl PocketBaseStorage {
         );
         let resp = curl_request("PATCH", &url, Some(&token), Some(record), &[])?;
         if resp.status != 200 && resp.status != 204 {
-            return Err(AppError::Network(format!(
-                "Failed to update record in '{}' (HTTP {}): {}",
-                collection, resp.status, resp.body
-            )));
+            return Err(http_error(
+                "update record in",
+                collection,
+                resp.status,
+                &resp.body,
+                &url,
+                &[],
+            ));
         }
         Ok(())
     }
@@ -601,10 +698,14 @@ impl PocketBaseStorage {
         );
         let resp = curl_request("DELETE", &url, Some(&token), None, &[])?;
         if resp.status != 200 && resp.status != 204 {
-            return Err(AppError::Network(format!(
-                "Failed to delete record in '{}' (HTTP {}): {}",
-                collection, resp.status, resp.body
-            )));
+            return Err(http_error(
+                "delete record in",
+                collection,
+                resp.status,
+                &resp.body,
+                &url,
+                &[],
+            ));
         }
         Ok(())
     }
@@ -644,10 +745,14 @@ impl PocketBaseStorage {
             }
             let resp = curl_request("GET", &url, Some(&token), None, &query)?;
             if resp.status != 200 {
-                return Err(AppError::Network(format!(
-                    "Failed to list records in '{}' (HTTP {}): {}",
-                    collection, resp.status, resp.body
-                )));
+                return Err(http_error(
+                    "list records",
+                    collection,
+                    resp.status,
+                    &resp.body,
+                    &url,
+                    &query,
+                ));
             }
             let batch = resp
                 .body
@@ -902,5 +1007,83 @@ impl Storage for PocketBaseStorage {
         let filter = format!("run_id = \"{}\"", run_id);
         let records = self.list_records(collections::EXPLOIT_EXECUTIONS, Some(&filter))?;
         Ok(records.iter().map(record_to_exploit_execution).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_field_is_execution_id_for_exploit_executions() {
+        assert_eq!(id_field_for("ExploitExecutions"), "execution_id");
+    }
+
+    #[test]
+    fn id_field_is_stable_id_for_all_other_collections() {
+        assert_eq!(id_field_for("Assets"), "stable_id");
+        assert_eq!(id_field_for("Services"), "stable_id");
+        assert_eq!(id_field_for("Findings"), "stable_id");
+        assert_eq!(id_field_for("Observations"), "stable_id");
+        assert_eq!(id_field_for("ScanRuns"), "stable_id");
+    }
+
+    #[test]
+    fn every_required_collection_has_a_valid_id_field() {
+        for collection in collections::ALL {
+            let field = id_field_for(collection);
+            let defs = schema::field_defs(collection);
+            assert!(
+                defs.iter().any(|def| def.name == field),
+                "collection '{}' schema missing its id field '{}'",
+                collection,
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn concise_error_is_used_by_default() {
+        assert!(!is_verbose());
+        let err = http_error(
+            "query records",
+            "ExploitExecutions",
+            400,
+            &json!({"message": "boom"}),
+            "http://pocketbase/api/collections/ExploitExecutions/records",
+            &[("filter", "stable_id = \"x\"")],
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("Failed to query records in 'ExploitExecutions' (HTTP 400)"));
+        assert!(
+            !msg.contains("backtrace"),
+            "concise error leaked debug detail: {msg}"
+        );
+    }
+
+    #[test]
+    fn verbose_error_includes_request_context() {
+        set_verbose(true);
+        let err = http_error(
+            "query records",
+            "ExploitExecutions",
+            400,
+            &json!({"data": {}, "message": "Something went wrong"}),
+            "http://pocketbase/api/collections/ExploitExecutions/records",
+            &[
+                ("filter", "stable_id = \"x\""),
+                ("sort", "-created"),
+                ("expand", "rel"),
+                ("perPage", "500"),
+            ],
+        );
+        set_verbose(false);
+        let msg = err.to_string();
+        assert!(msg.contains("filter: stable_id = \"x\""), "{msg}");
+        assert!(msg.contains("sort: -created"));
+        assert!(msg.contains("expand: rel"));
+        assert!(msg.contains("request params: perPage=500"));
+        assert!(msg.contains("response body:"));
+        assert!(msg.contains("backtrace:"));
     }
 }

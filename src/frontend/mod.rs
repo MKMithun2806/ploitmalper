@@ -431,6 +431,7 @@ pub fn ts_since(ts: &str, since: OffsetDateTime) -> bool {
 /// Open the configured backend, honouring `--backend` / `--pocketbase-url` /
 /// `--sqlite-path` overrides, and fail clearly when unconfigured/unreachable.
 pub fn open_backend(config_mgr: &ConfigManager, args: &Args) -> Result<Box<dyn Storage>> {
+    crate::db::pocketbase::set_verbose(args.has("verbose"));
     let db = config_mgr.get_database_config().clone();
     if !db.configured {
         return Err(AppError::Message(
