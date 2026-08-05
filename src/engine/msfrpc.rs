@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 
-use crate::error::Result;
+use crate::error::{AppError, Result};
 use crate::models::{
-    MSFHostCheckResult, MSFHostInfo, MSFHostsResult, MSFLoginResult, MSFWorkspaceInfo,
+    MSFHostCheckResult, MSFHostInfo, MSFHostsResult, MSFLoginResult, MSFModule, MSFWorkspaceInfo,
     MSFWorkspacesResult,
 };
 use crate::msgpack::{decode, encode, MsgValue};
@@ -190,21 +190,106 @@ impl MsfRpcClient {
     }
 
     /// Verify that a module exists on the connected Metasploit instance.
-    /// `module_type` is `exploit` or `auxiliary` (the types the planner emits).
+    /// `module_type` is `exploit`, `auxiliary` or `post`.
+    ///
+    /// Distinguishes three outcomes: the module exists (`Ok(true)`), it does
+    /// not exist (`Ok(false)`), or the lookup itself failed (`Err`).
     pub fn module_exists(&self, module_type: &str, name: &str) -> Result<bool> {
-        let method = if module_type == "auxiliary" {
-            "module.auxiliary"
-        } else {
-            "module.exploit"
-        };
-        let val = self.rpc_call(method, &[msg_str(name)], 15)?;
-        let result = val.get("result").and_then(MsgValue::as_str).unwrap_or("");
-        Ok(result == "success")
+        match self.module_info(module_type, name) {
+            Ok(_) => Ok(true),
+            Err(AppError::RpcModuleNotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
-    /// Fetch full module metadata (options, targets, rank, description, ...).
+    /// Fetch full module metadata via `module.info`.
+    ///
+    /// The RPC `module.info` handler accepts both `[ModuleType, ModuleName]`
+    /// (modern signature) and a single full `ModuleName` (legacy signature).
+    /// We send the modern form first and transparently fall back to the legacy
+    /// form so the same code works across framework releases.
     pub fn module_info(&self, module_type: &str, name: &str) -> Result<MsgValue> {
-        self.rpc_call("module.info", &[msg_str(module_type), msg_str(name)], 15)
+        let leaf = strip_type_prefix(module_type, name);
+        let modern = self.rpc_call("module.info", &[msg_str(module_type), msg_str(&leaf)], 15)?;
+        if let Some(message) = response_error(&modern) {
+            // A module.info error usually means "not found"; retry once with
+            // the legacy single-name signature in case this is an old server.
+            let legacy = self.rpc_call(
+                "module.info",
+                &[msg_str(&full_name(module_type, name))],
+                15,
+            )?;
+            if let Some(legacy_message) = response_error(&legacy) {
+                return Err(classify_lookup(&legacy_message));
+            }
+            let _ = message;
+            return Ok(legacy);
+        }
+        Ok(modern)
+    }
+
+    /// Fetch the datastore options for a module via `module.options`.
+    /// Modern servers accept `[ModuleType, ModuleName]`; legacy servers accept
+    /// a single module name, so we mirror the `module.info` fallback.
+    pub fn module_options(&self, module_type: &str, name: &str) -> Result<MsgValue> {
+        let leaf = strip_type_prefix(module_type, name);
+        let modern = self.rpc_call("module.options", &[msg_str(module_type), msg_str(&leaf)], 15)?;
+        if response_error(&modern).is_none() {
+            return Ok(modern);
+        }
+        let legacy = self.rpc_call(
+            "module.options",
+            &[msg_str(&full_name(module_type, name))],
+            15,
+        )?;
+        if let Some(message) = response_error(&legacy) {
+            return Err(classify_lookup(&message));
+        }
+        Ok(legacy)
+    }
+
+    /// List every module of the given RPC type currently loaded by the
+    /// instance. Returns full refnames including the type prefix, e.g.
+    /// `auxiliary/scanner/http/robots_txt`.
+    ///
+    /// RPC listing methods take no arguments; passing a module name to them is
+    /// ignored (or rejected by stricter servers) and would never be a valid
+    /// existence probe.
+    pub fn list_modules_for_type(&self, module_type: &str) -> Result<Vec<MSFModule>> {
+        let method = match module_type {
+            "exploit" => "module.exploits",
+            "auxiliary" => "module.auxiliary",
+            "post" => "module.post",
+            other => {
+                return Err(AppError::Message(format!(
+                    "cannot list modules of unknown type '{other}'"
+                )));
+            }
+        };
+        let val = self.rpc_call(method, &[], 15)?;
+        if let Some(message) = response_error(&val) {
+            return Err(classify_lookup(&message));
+        }
+        Ok(extract_module_list(&val, module_type))
+    }
+
+    /// Load the union of all exploit, auxiliary and post modules known to the
+    /// connected instance. Used by the process pipeline so suggestions are
+    /// grounded in what the instance can actually run.
+    pub fn list_modules(&self) -> Result<Vec<MSFModule>> {
+        let mut modules = Vec::new();
+        let mut errors = Vec::new();
+        for module_type in ["exploit", "auxiliary", "post"] {
+            match self.list_modules_for_type(module_type) {
+                Ok(mut found) => modules.append(&mut found),
+                Err(error) => errors.push(error),
+            }
+        }
+        if modules.is_empty() && !errors.is_empty() {
+            return Err(errors.remove(0));
+        }
+        modules.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(modules)
     }
 
     /// Execute a module. Returns a map containing `job_id` on success or an
@@ -225,7 +310,11 @@ impl MsfRpcClient {
         }
         self.rpc_call(
             "module.execute",
-            &[msg_str(module_type), msg_str(name), MsgValue::Map(opts)],
+            &[
+                msg_str(module_type),
+                msg_str(&strip_type_prefix(module_type, name)),
+                MsgValue::Map(opts),
+            ],
             30,
         )
     }
@@ -272,6 +361,110 @@ fn msg_array(values: Vec<MsgValue>) -> MsgValue {
 fn build_url(host: &str, port: u16, ssl: bool) -> String {
     let scheme = if ssl { "https" } else { "http" };
     format!("{}://{}:{}/api/", scheme, host, port)
+}
+
+/// Strip a leading `exploit/`, `auxiliary/` or `post/` type prefix from a
+/// module name. RPC module handlers accept the bare leaf name (or, per the
+/// docs, the prefixed form) but the listing methods always return the leaf.
+fn strip_type_prefix(module_type: &str, name: &str) -> String {
+    for prefix in [module_type, "exploit", "auxiliary", "post"] {
+        if let Some(rest) = name.strip_prefix(&format!("{prefix}/")) {
+            return rest.to_string();
+        }
+    }
+    name.to_string()
+}
+
+/// Rebuild the full refname, e.g. `auxiliary/scanner/http/robots_txt`.
+fn full_name(module_type: &str, name: &str) -> String {
+    if ["exploit", "auxiliary", "post"]
+        .iter()
+        .any(|p| name.starts_with(&format!("{}/", p)))
+    {
+        return name.to_string();
+    }
+    match module_type {
+        "exploit" | "auxiliary" | "post" => format!("{module_type}/{name}"),
+        _ => name.to_string(),
+    }
+}
+
+/// Inspect an RPC response map for an error payload.
+///
+/// Metasploit returns `{ "error" => true, "error_message" => "..." }` (or
+/// `error_string`) on failure and omits the key (or sets it to `false` /
+/// `"success"`) on success. Returns the human-readable message for errors.
+fn response_error(val: &MsgValue) -> Option<String> {
+    match val.get("error") {
+        None => None,
+        Some(MsgValue::Bool(false)) => None,
+        Some(MsgValue::String(value)) if value == "success" => None,
+        Some(MsgValue::String(value)) if value == "true" => Some(error_message(val)),
+        Some(MsgValue::UInt(0)) | Some(MsgValue::Int(0)) => None,
+        Some(_) => Some(error_message(val)),
+    }
+}
+
+fn error_message(val: &MsgValue) -> String {
+    val.get("error_message")
+        .or_else(|| val.get("error_string"))
+        .and_then(MsgValue::as_str)
+        .unwrap_or("MSF-RPC command failed")
+        .to_string()
+}
+
+/// Map a module lookup failure message to the error type that callers use to
+/// distinguish "module really is missing" from any other RPC failure.
+fn classify_lookup(message: &str) -> AppError {
+    let lower = message.to_lowercase();
+    if lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("missing")
+        || lower.contains("invalid")
+    {
+        AppError::RpcModuleNotFound(message.to_string())
+    } else {
+        AppError::Rpc(message.to_string())
+    }
+}
+
+/// Parse a `module.exploits` / `module.auxiliary` / `module.post` listing
+/// response. Newer servers return `{ "modules" => [ "scanner/http/...", ... ] }`
+/// (an array); some versions return a name -> description hash. Both are
+/// handled so the loader works across releases.
+fn extract_module_list(val: &MsgValue, module_type: &str) -> Vec<MSFModule> {
+    let mut names: Vec<String> = Vec::new();
+    match val.get("modules") {
+        Some(MsgValue::Array(items)) => {
+            for item in items {
+                if let Some(name) = item.as_str() {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        Some(MsgValue::Map(items)) => {
+            names.extend(items.keys().cloned());
+        }
+        _ => {
+            // Some legacy servers return the map directly with no "modules" key.
+            if let MsgValue::Map(items) = val {
+                names.extend(items.keys().cloned());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|name| MSFModule {
+            name: full_name(module_type, &name),
+            cve: None,
+            rank: String::new(),
+            disclosure_date: "unknown".to_string(),
+            platforms: Vec::new(),
+            required_options: Vec::new(),
+        })
+        .collect()
 }
 
 fn send_request(
@@ -428,4 +621,151 @@ fn extract_hosts(val: &MsgValue) -> Vec<MSFHostInfo> {
         }
     }
     hosts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map_of(pairs: &[(&str, MsgValue)]) -> MsgValue {
+        MsgValue::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn strips_type_prefix_from_various_forms() {
+        assert_eq!(
+            strip_type_prefix("auxiliary", "auxiliary/scanner/http/robots_txt"),
+            "scanner/http/robots_txt"
+        );
+        assert_eq!(
+            strip_type_prefix("exploit", "exploit/windows/smb/ms17_010_eternalblue"),
+            "windows/smb/ms17_010_eternalblue"
+        );
+        // Already leaf-only: unchanged.
+        assert_eq!(strip_type_prefix("auxiliary", "scanner/http/robots_txt"), "scanner/http/robots_txt");
+        // Wrong module_type but explicit prefix present: still stripped.
+        assert_eq!(
+            strip_type_prefix("post", "auxiliary/scanner/http/robots_txt"),
+            "scanner/http/robots_txt"
+        );
+    }
+
+    #[test]
+    fn rebuilds_full_name() {
+        assert_eq!(
+            full_name("auxiliary", "scanner/http/robots_txt"),
+            "auxiliary/scanner/http/robots_txt"
+        );
+        // Already prefixed: left alone.
+        assert_eq!(
+            full_name("exploit", "exploit/windows/smb/ms17_010_eternalblue"),
+            "exploit/windows/smb/ms17_010_eternalblue"
+        );
+        // Unknown type: passthrough (no bogus prefix).
+        assert_eq!(full_name("payload", "linux/x64/shell"), "linux/x64/shell");
+    }
+
+    #[test]
+    fn extracts_module_list_from_array_form() {
+        let val = map_of(&[(
+            "modules",
+            MsgValue::Array(vec![
+                MsgValue::String("scanner/http/robots_txt".to_string()),
+                MsgValue::String("scanner/http/apache_version".to_string()),
+            ]),
+        )]);
+        let modules = extract_module_list(&val, "auxiliary");
+        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "auxiliary/scanner/http/apache_version",
+                "auxiliary/scanner/http/robots_txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn extracts_module_list_from_map_form() {
+        let val = map_of(&[(
+            "modules",
+            MsgValue::Map(BTreeMap::from([
+                ("scanner/http/robots_txt".to_string(), msg_str("desc")),
+                ("scanner/ssh/ssh_version".to_string(), msg_str("desc")),
+            ])),
+        )]);
+        let modules = extract_module_list(&val, "auxiliary");
+        assert!(modules.iter().any(|m| m.name == "auxiliary/scanner/http/robots_txt"));
+        assert!(modules.iter().any(|m| m.name == "auxiliary/scanner/ssh/ssh_version"));
+    }
+
+    #[test]
+    fn extracts_module_names_without_modules_key() {
+        // Some legacy servers return the name -> description hash directly.
+        let val = MsgValue::Map(BTreeMap::from([(
+            "scanner/http/robots_txt".to_string(),
+            msg_str("description"),
+        )]));
+        let modules = extract_module_list(&val, "auxiliary");
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "auxiliary/scanner/http/robots_txt");
+    }
+
+    #[test]
+    fn response_error_detects_success_and_failure() {
+        // No error key: success.
+        assert!(response_error(&map_of(&[("result", msg_str("success"))])).is_none());
+        // Bool false: success.
+        assert!(response_error(&map_of(&[("error", MsgValue::Bool(false))])).is_none());
+        // "error" => "success": success.
+        assert!(response_error(&map_of(&[("error", msg_str("success"))])).is_none());
+        // Bool true with message: failure.
+        let err = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_message", msg_str("Module not found")),
+        ]);
+        assert_eq!(response_error(&err).as_deref(), Some("Module not found"));
+        // Int 0: success; nonzero: failure.
+        assert!(response_error(&map_of(&[("error", MsgValue::Int(0))])).is_none());
+        assert!(response_error(&map_of(&[("error", MsgValue::Int(1))])).is_some());
+    }
+
+    #[test]
+    fn classifies_missing_vs_other_rpc_failures() {
+        assert!(matches!(
+            classify_lookup("Module not found"),
+            AppError::RpcModuleNotFound(_)
+        ));
+        assert!(matches!(
+            classify_lookup("The referenced module does not exist"),
+            AppError::RpcModuleNotFound(_)
+        ));
+        assert!(matches!(
+            classify_lookup("Missing module name"),
+            AppError::RpcModuleNotFound(_)
+        ));
+        assert!(matches!(
+            classify_lookup("Permission denied"),
+            AppError::Rpc(_)
+        ));
+    }
+
+    #[test]
+    fn module_existence_decision_uses_classification() {
+        // The pure decision used by module_exists: found when module.info
+        // succeeds, missing when it reports not-found, error otherwise.
+        let decision = |msg: Option<&str>| match msg {
+            None => Ok(true),
+            Some(m) if matches!(classify_lookup(m), AppError::RpcModuleNotFound(_)) => Ok(false),
+            Some(_) => Err(AppError::Rpc(String::new())),
+        };
+        assert_eq!(decision(None).unwrap(), true);
+        assert_eq!(decision(Some("Module not found")).unwrap(), false);
+        assert!(decision(Some("Permission denied")).is_err());
+    }
 }

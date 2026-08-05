@@ -126,14 +126,6 @@ fn catalog() -> &'static Vec<MSFModule> {
                 required_options: vec!["RHOSTS".into()],
             },
             MSFModule {
-                name: "auxiliary/scanner/http/nginx_version".into(),
-                cve: None,
-                rank: "normal".into(),
-                disclosure_date: "unknown".into(),
-                platforms: vec!["Nginx".into()],
-                required_options: vec!["RHOSTS".into()],
-            },
-            MSFModule {
                 name: "auxiliary/scanner/http/iis_version".into(),
                 cve: None,
                 rank: "normal".into(),

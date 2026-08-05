@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::config::ConfigManager;
-use crate::engine::{dedup, matcher, parser};
+use crate::engine::{catalog::LiveModuleCatalog, dedup, matcher, msfrpc, parser};
 use crate::error::{AppError, Result};
 use crate::models::{DedupStats, InjectableEndpoint, ModuleSuggestion, ScanRecord};
 use crate::nvd::{EnrichmentStats, NVDClient};
@@ -101,8 +101,11 @@ pub fn process_scan_file(
         println!();
     }
 
+    let live_catalog = connect_live_catalog(config_mgr, opts.verbose)?;
+
     let mut all_suggestions = Vec::<ModuleSuggestion>::new();
     let mut seen_suggestions = HashSet::<(String, String)>::new();
+    let mut dropped_offline = BTreeSet::<String>::new();
 
     println!("[+] Analyzing service banners, technologies and CVEs for module suggestions...");
     for record in &records {
@@ -110,7 +113,13 @@ pub fn process_scan_file(
             if opts.verbose {
                 println!("[dbg] searching modules for service '{}'", service);
             }
-            for suggestion in matcher::suggest_modules(service) {
+            let offline = matcher::suggest_modules(service);
+            let live = match &live_catalog {
+                Some(catalog) => catalog.suggest_for_banner(service),
+                None => Vec::new(),
+            };
+            note_dropped_offline(&live_catalog, &offline, &live, &mut dropped_offline);
+            for suggestion in live_or_offline(&live_catalog, offline, live) {
                 push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
             }
         }
@@ -118,7 +127,13 @@ pub fn process_scan_file(
             if opts.verbose {
                 println!("[dbg] matching modules for title '{}'", record.title);
             }
-            for suggestion in matcher::suggest_from_title(&record.title, &record.detail) {
+            let offline = matcher::suggest_from_title(&record.title, &record.detail);
+            let live = match &live_catalog {
+                Some(catalog) => catalog.suggest_for_title(&record.title, &record.detail),
+                None => Vec::new(),
+            };
+            note_dropped_offline(&live_catalog, &offline, &live, &mut dropped_offline);
+            for suggestion in live_or_offline(&live_catalog, offline, live) {
                 push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
             }
         }
@@ -126,19 +141,33 @@ pub fn process_scan_file(
             if opts.verbose {
                 println!("[dbg] searching modules for {}", cve);
             }
-            for module in crate::msf::modules_for_cve(cve) {
-                let suggestion = ModuleSuggestion {
-                    service_banner: format!("cve:{}", cve),
-                    suggested_module: module.name.clone(),
-                    confidence: if module.rank == "excellent" || module.rank == "great" {
-                        "high".to_string()
-                    } else {
-                        "medium".to_string()
-                    },
-                };
+            let offline: Vec<ModuleSuggestion> = crate::msf::modules_for_cve(cve)
+                .into_iter()
+                .map(|module| suggestion_for_module(cve, &module))
+                .collect();
+            let live: Vec<ModuleSuggestion> = match &live_catalog {
+                Some(catalog) => catalog
+                    .modules_for_cve(cve)
+                    .into_iter()
+                    .map(|module| suggestion_for_module(cve, &module))
+                    .collect(),
+                None => Vec::new(),
+            };
+            note_dropped_offline(&live_catalog, &offline, &live, &mut dropped_offline);
+            for suggestion in live_or_offline(&live_catalog, offline, live) {
                 push_unique_suggestion(&mut all_suggestions, &mut seen_suggestions, suggestion);
             }
         }
+    }
+
+    if !dropped_offline.is_empty() {
+        let dropped: Vec<&str> = dropped_offline.iter().map(String::as_str).collect();
+        println!(
+            "[!] Skipping {} module(s) not present on the connected MSF instance: {}",
+            dropped.len(),
+            dropped.join(", ")
+        );
+        println!();
     }
 
     if all_suggestions.is_empty() {
@@ -244,5 +273,153 @@ fn push_unique_suggestion(
     );
     if seen.insert(key) {
         suggestions.push(suggestion);
+    }
+}
+
+/// Connect to the configured MSF-RPC instance and load the live module
+/// catalog. Returns `None` (and falls back to the offline catalogs) whenever
+/// the instance is unreachable or its module listing cannot be fetched, so the
+/// shared pipeline keeps working without a live Metasploit.
+fn connect_live_catalog(
+    config_mgr: &ConfigManager,
+    verbose: bool,
+) -> Result<Option<LiveModuleCatalog>> {
+    if !config_mgr.is_configured() {
+        if verbose {
+            println!("[dbg] MSF-RPC not configured; using offline module catalogs.");
+        }
+        return Ok(None);
+    }
+    let cfg = config_mgr.get_msfrpc_config().clone();
+    println!("[+] Connecting to MSF-RPC for live module lookup...");
+    let mut client = msfrpc::MsfRpcClient::new(
+        &cfg.host,
+        cfg.port,
+        &cfg.username,
+        &cfg.password,
+        cfg.ssl,
+    );
+    let login = client.login()?;
+    if !login.success {
+        println!(
+            "[!] MSF-RPC unreachable at {}:{}; using offline module catalogs. ({})",
+            cfg.host, cfg.port, login.error
+        );
+        return Ok(None);
+    }
+    let modules = match client.list_modules() {
+        Ok(modules) => modules,
+        Err(error) => {
+            println!(
+                "[!] Could not list modules from MSF-RPC; using offline module catalogs. ({error})"
+            );
+            client.logout();
+            return Ok(None);
+        }
+    };
+    let catalog = LiveModuleCatalog::from_modules(modules);
+    println!(
+        "[+] Loaded {} module(s) from the connected instance; suggestions verified live.",
+        catalog.len()
+    );
+    client.logout();
+    Ok(Some(catalog))
+}
+
+/// When a live catalog is active, suggestions must come from the live module
+/// list (which may be empty — that is the point: no offline guesses). When it
+/// is not active, the offline suggestions are used as before.
+fn live_or_offline(
+    live_catalog: &Option<LiveModuleCatalog>,
+    offline: Vec<ModuleSuggestion>,
+    live: Vec<ModuleSuggestion>,
+) -> Vec<ModuleSuggestion> {
+    if live_catalog.is_some() {
+        live
+    } else {
+        offline
+    }
+}
+
+/// Record which offline-catalog modules were dropped because they do not exist
+/// on the connected instance, so the operator can see the live verification in
+/// action instead of silently losing suggestions.
+fn note_dropped_offline(
+    live_catalog: &Option<LiveModuleCatalog>,
+    offline: &[ModuleSuggestion],
+    live: &[ModuleSuggestion],
+    dropped: &mut BTreeSet<String>,
+) {
+    if live_catalog.is_none() {
+        return;
+    }
+    let live_names: HashSet<&str> = live
+        .iter()
+        .map(|s| s.suggested_module.as_str())
+        .collect();
+    for suggestion in offline {
+        if !live_names.contains(suggestion.suggested_module.as_str()) {
+            dropped.insert(suggestion.suggested_module.clone());
+        }
+    }
+}
+
+fn suggestion_for_module(cve: &str, module: &crate::models::MSFModule) -> ModuleSuggestion {
+    ModuleSuggestion {
+        service_banner: format!("cve:{}", cve),
+        suggested_module: module.name.clone(),
+        confidence: if module.rank == "excellent" || module.rank == "great" {
+            "high".to_string()
+        } else {
+            "medium".to_string()
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn suggestion(module: &str) -> ModuleSuggestion {
+        ModuleSuggestion {
+            service_banner: "banner".to_string(),
+            suggested_module: module.to_string(),
+            confidence: "high".to_string(),
+        }
+    }
+
+    #[test]
+    fn live_catalog_suppresses_offline_guesses() {
+        // nginx_version exists only in the offline catalog; with a live catalog
+        // present the offline suggestion must be dropped.
+        let offline = vec![suggestion("auxiliary/scanner/http/nginx_version")];
+        let live: Vec<ModuleSuggestion> = Vec::new();
+        let mut dropped = BTreeSet::new();
+        note_dropped_offline(
+            &Some(LiveModuleCatalog::from_modules(Vec::new())),
+            &offline,
+            &live,
+            &mut dropped,
+        );
+        assert!(dropped.contains("auxiliary/scanner/http/nginx_version"));
+    }
+
+    #[test]
+    fn offline_fallback_keeps_offline_suggestions() {
+        // Without a live catalog the offline suggestions flow through.
+        let offline = vec![suggestion("auxiliary/scanner/http/robots_txt")];
+        let live: Vec<ModuleSuggestion> = Vec::new();
+        let chosen = live_or_offline(&None, offline.clone(), live);
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].suggested_module, "auxiliary/scanner/http/robots_txt");
+    }
+
+    #[test]
+    fn live_catalog_replaces_offline_suggestions() {
+        let offline = vec![suggestion("auxiliary/scanner/http/nginx_version")];
+        let live = vec![suggestion("auxiliary/scanner/http/robots_txt")];
+        let chosen = live_or_offline(&Some(LiveModuleCatalog::from_modules(Vec::new())), offline, live);
+        assert_eq!(chosen.len(), 1);
+        assert_eq!(chosen[0].suggested_module, "auxiliary/scanner/http/robots_txt");
     }
 }

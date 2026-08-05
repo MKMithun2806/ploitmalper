@@ -12,6 +12,10 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("Network error: {0}")]
     Network(String),
+    #[error("MSF-RPC error: {0}")]
+    Rpc(String),
+    #[error("MSF-RPC module not found: {0}")]
+    RpcModuleNotFound(String),
     #[error("msgpack error: {0}")]
     Msgpack(String),
     #[error("invalid data: {0}")]

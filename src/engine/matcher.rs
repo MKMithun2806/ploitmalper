@@ -8,7 +8,6 @@ const BANNER_CATALOG: &[(&str, &[&str])] = &[
             "auxiliary/scanner/http/apache_version",
         ],
     ),
-    ("nginx", &["auxiliary/scanner/http/nginx_version"]),
     ("iis", &["auxiliary/scanner/http/iis_version"]),
     ("openssh", &["auxiliary/scanner/ssh/ssh_version"]),
     (
