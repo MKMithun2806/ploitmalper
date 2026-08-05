@@ -292,13 +292,8 @@ fn connect_live_catalog(
     }
     let cfg = config_mgr.get_msfrpc_config().clone();
     println!("[+] Connecting to MSF-RPC for live module lookup...");
-    let mut client = msfrpc::MsfRpcClient::new(
-        &cfg.host,
-        cfg.port,
-        &cfg.username,
-        &cfg.password,
-        cfg.ssl,
-    );
+    let mut client =
+        msfrpc::MsfRpcClient::new(&cfg.host, cfg.port, &cfg.username, &cfg.password, cfg.ssl);
     let login = client.login()?;
     if !login.success {
         println!(
@@ -353,10 +348,7 @@ fn note_dropped_offline(
     if live_catalog.is_none() {
         return;
     }
-    let live_names: HashSet<&str> = live
-        .iter()
-        .map(|s| s.suggested_module.as_str())
-        .collect();
+    let live_names: HashSet<&str> = live.iter().map(|s| s.suggested_module.as_str()).collect();
     for suggestion in offline {
         if !live_names.contains(suggestion.suggested_module.as_str()) {
             dropped.insert(suggestion.suggested_module.clone());
@@ -411,15 +403,25 @@ mod tests {
         let live: Vec<ModuleSuggestion> = Vec::new();
         let chosen = live_or_offline(&None, offline.clone(), live);
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].suggested_module, "auxiliary/scanner/http/robots_txt");
+        assert_eq!(
+            chosen[0].suggested_module,
+            "auxiliary/scanner/http/robots_txt"
+        );
     }
 
     #[test]
     fn live_catalog_replaces_offline_suggestions() {
         let offline = vec![suggestion("auxiliary/scanner/http/nginx_version")];
         let live = vec![suggestion("auxiliary/scanner/http/robots_txt")];
-        let chosen = live_or_offline(&Some(LiveModuleCatalog::from_modules(Vec::new())), offline, live);
+        let chosen = live_or_offline(
+            &Some(LiveModuleCatalog::from_modules(Vec::new())),
+            offline,
+            live,
+        );
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].suggested_module, "auxiliary/scanner/http/robots_txt");
+        assert_eq!(
+            chosen[0].suggested_module,
+            "auxiliary/scanner/http/robots_txt"
+        );
     }
 }

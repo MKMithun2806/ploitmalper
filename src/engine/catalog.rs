@@ -207,7 +207,9 @@ mod tests {
         let catalog = sample_catalog();
         let suggestions = catalog.suggest_for_banner("environment variables");
         assert!(
-            !suggestions.iter().any(|s| s.suggested_module.starts_with("post/")),
+            !suggestions
+                .iter()
+                .any(|s| s.suggested_module.starts_with("post/")),
             "post modules operate on sessions and must not be host suggestions"
         );
     }
@@ -219,7 +221,9 @@ mod tests {
         // The offline catalog maps this CVE to apache_path_traversal, but the
         // simulated instance does not load it, so nothing should be returned.
         assert!(
-            !modules.iter().any(|m| m.name.contains("apache_path_traversal")),
+            !modules
+                .iter()
+                .any(|m| m.name.contains("apache_path_traversal")),
             "offline-only candidates must be filtered out when not present live"
         );
     }

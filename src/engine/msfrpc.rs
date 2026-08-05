@@ -214,11 +214,8 @@ impl MsfRpcClient {
         if let Some(message) = response_error(&modern) {
             // A module.info error usually means "not found"; retry once with
             // the legacy single-name signature in case this is an old server.
-            let legacy = self.rpc_call(
-                "module.info",
-                &[msg_str(&full_name(module_type, name))],
-                15,
-            )?;
+            let legacy =
+                self.rpc_call("module.info", &[msg_str(&full_name(module_type, name))], 15)?;
             if let Some(legacy_message) = response_error(&legacy) {
                 return Err(classify_lookup(&legacy_message));
             }
@@ -233,7 +230,11 @@ impl MsfRpcClient {
     /// a single module name, so we mirror the `module.info` fallback.
     pub fn module_options(&self, module_type: &str, name: &str) -> Result<MsgValue> {
         let leaf = strip_type_prefix(module_type, name);
-        let modern = self.rpc_call("module.options", &[msg_str(module_type), msg_str(&leaf)], 15)?;
+        let modern = self.rpc_call(
+            "module.options",
+            &[msg_str(module_type), msg_str(&leaf)],
+            15,
+        )?;
         if response_error(&modern).is_none() {
             return Ok(modern);
         }
@@ -647,7 +648,10 @@ mod tests {
             "windows/smb/ms17_010_eternalblue"
         );
         // Already leaf-only: unchanged.
-        assert_eq!(strip_type_prefix("auxiliary", "scanner/http/robots_txt"), "scanner/http/robots_txt");
+        assert_eq!(
+            strip_type_prefix("auxiliary", "scanner/http/robots_txt"),
+            "scanner/http/robots_txt"
+        );
         // Wrong module_type but explicit prefix present: still stripped.
         assert_eq!(
             strip_type_prefix("post", "auxiliary/scanner/http/robots_txt"),
@@ -700,8 +704,12 @@ mod tests {
             ])),
         )]);
         let modules = extract_module_list(&val, "auxiliary");
-        assert!(modules.iter().any(|m| m.name == "auxiliary/scanner/http/robots_txt"));
-        assert!(modules.iter().any(|m| m.name == "auxiliary/scanner/ssh/ssh_version"));
+        assert!(modules
+            .iter()
+            .any(|m| m.name == "auxiliary/scanner/http/robots_txt"));
+        assert!(modules
+            .iter()
+            .any(|m| m.name == "auxiliary/scanner/ssh/ssh_version"));
     }
 
     #[test]
