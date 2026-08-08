@@ -8,7 +8,7 @@ use crate::frontend::{
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper findings [--severity LEVEL] [--cve ID] [--asset TERM] [--new] \
+        "Usage: ploit-malper findings [--tui] [--severity LEVEL] [--cve ID] [--asset TERM] [--new] \
          [--fixed] [--since DATE] [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
@@ -92,6 +92,10 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
             .then_with(|| a.title.cmp(&b.title))
     });
 
+    if parsed.has("tui") && crate::frontend::tui::interactive() {
+        return tui_findings(&selected, &obs_index, &maps);
+    }
+
     let mut table = Table::new(vec![
         "SEVERITY".to_string(),
         "TITLE".to_string(),
@@ -166,5 +170,45 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
         }
     }
 
+    Ok(())
+}
+
+fn tui_findings(
+    selected: &[&Finding],
+    obs_index: &ObsIndex,
+    maps: &IdMaps,
+) -> Result<()> {
+    let columns: &[&str] = &[
+        "SEVERITY",
+        "TITLE",
+        "ASSET",
+        "PORT",
+        "FIRST SEEN",
+        "LAST SEEN",
+        "CHANGE",
+    ];
+    let mut rows = Vec::with_capacity(selected.len());
+    for finding in selected {
+        let state = obs_index.state(&finding.stable_id, &finding.status);
+        let title = if finding.cves.is_empty() {
+            finding.title.clone()
+        } else {
+            format!("{} ({})", finding.title, finding.cves.join(", "))
+        };
+        rows.push(crate::frontend::tui::ViewerRow::new(vec![
+            severity_label(&finding.severity),
+            title,
+            maps.asset_name(&finding.asset_id),
+            finding
+                .service_id
+                .as_deref()
+                .map(|id| maps.service_label(id))
+                .unwrap_or_else(|| "-".to_string()),
+            fmt_ts(&finding.first_seen),
+            fmt_ts(&finding.last_seen),
+            state.label().to_string(),
+        ]));
+    }
+    let _ = crate::frontend::tui::view_table("Findings", columns, rows)?;
     Ok(())
 }

@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::frontend::{empty_result, fmt_ts, open_backend, print_json, Args, Cell, Table};
 
 pub fn usage() {
-    println!("Usage: ploit-malper runs [--verbose] [--json] [--backend pocketbase|sqlite]");
+    println!("Usage: ploit-malper runs [--tui] [--verbose] [--json] [--backend pocketbase|sqlite]");
 }
 
 pub fn cmd_runs(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
@@ -25,6 +25,10 @@ pub fn cmd_runs(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
         empty_result("scan runs");
         println!("Ingest a scan folder with 'ploit-malper ingest <folder>' to create runs.");
         return Ok(());
+    }
+
+    if parsed.has("tui") && crate::frontend::tui::interactive() {
+        return tui_runs(&runs);
     }
 
     let mut table = Table::new(vec![
@@ -94,6 +98,39 @@ pub fn cmd_runs(args: &[String], config_mgr: &mut ConfigManager) -> Result<()> {
 
 fn short_id(stable_id: &str) -> String {
     crate::frontend::truncate(stable_id, 16)
+}
+
+fn tui_runs(runs: &[ScanRun]) -> Result<()> {
+    let columns: &[&str] = &[
+        "RUN ID",
+        "TARGET",
+        "STARTED",
+        "ARTIFACTS",
+        "TOOLS",
+        "STATS",
+    ];
+    let rows = runs
+        .iter()
+        .map(|run| {
+            crate::frontend::tui::ViewerRow::new(vec![
+                short_id(&run.stable_id),
+                run.target.clone(),
+                run.started_at
+                    .as_deref()
+                    .map(fmt_ts)
+                    .unwrap_or_else(|| "-".to_string()),
+                run.artifacts.len().to_string(),
+                if run.tools.is_empty() {
+                    "-".to_string()
+                } else {
+                    run.tools.join(",")
+                },
+                stats_summary(run),
+            ])
+        })
+        .collect();
+    let _ = crate::frontend::tui::view_table("Scan runs", columns, rows)?;
+    Ok(())
 }
 
 fn stats_summary(run: &ScanRun) -> String {

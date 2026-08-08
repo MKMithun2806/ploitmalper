@@ -4,6 +4,7 @@ pub mod findings;
 pub mod history;
 pub mod runs;
 pub mod services;
+pub mod tui;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal};
@@ -21,7 +22,7 @@ use crate::error::{AppError, Result};
 // ---------------------------------------------------------------------------
 
 const BOOLEAN_FLAGS: &[&str] = &[
-    "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes",
+    "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes", "tui",
 ];
 const VALUE_FLAGS: &[&str] = &[
     "target",
