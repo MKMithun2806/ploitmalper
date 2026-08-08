@@ -204,30 +204,43 @@ impl MsfRpcClient {
 
     /// Fetch full module metadata via `module.info`.
     ///
-    /// The RPC `module.info` handler accepts both `[ModuleType, ModuleName]`
-    /// (modern signature) and a single full `ModuleName` (legacy signature).
-    /// We send the modern form first and transparently fall back to the legacy
-    /// form so the same code works across framework releases.
+    /// The RPC `module.info` handler accepts `[ModuleType, ModuleName]` on
+    /// all supported framework releases. A modern server answers with a rich
+    /// metadata map for known modules and an error map ― classifiable as
+    /// "module not found" or an RPC failure ― for unknown ones. Only very old
+    /// frameworks still expect the single full-name signature; when the modern
+    /// response signals an argument-shape mismatch (rather than a missing
+    /// module) we fall back to that form once.
     pub fn module_info(&self, module_type: &str, name: &str) -> Result<MsgValue> {
         let leaf = strip_type_prefix(module_type, name);
         let modern = self.rpc_call("module.info", &[msg_str(module_type), msg_str(&leaf)], 15)?;
-        if let Some(message) = response_error(&modern) {
-            // A module.info error usually means "not found"; retry once with
-            // the legacy single-name signature in case this is an old server.
-            let legacy =
-                self.rpc_call("module.info", &[msg_str(&full_name(module_type, name))], 15)?;
-            if let Some(legacy_message) = response_error(&legacy) {
-                return Err(classify_lookup(&legacy_message));
+        match response_error(&modern) {
+            None => Ok(modern),
+            Some(message) => {
+                if is_missing_module(&modern) {
+                    return Err(AppError::RpcModuleNotFound(message));
+                }
+                // Not a lookup failure: probably an argument-shape mismatch on
+                // a server that only understands the legacy single-name form.
+                if looks_like_legacy_signature_error(&modern) {
+                    let legacy = self.rpc_call(
+                        "module.info",
+                        &[msg_str(&full_name(module_type, name))],
+                        15,
+                    )?;
+                    if let Some(legacy_message) = response_error(&legacy) {
+                        return Err(classify_lookup(&legacy_message));
+                    }
+                    return Ok(legacy);
+                }
+                Err(AppError::Rpc(message))
             }
-            let _ = message;
-            return Ok(legacy);
         }
-        Ok(modern)
     }
 
     /// Fetch the datastore options for a module via `module.options`.
-    /// Modern servers accept `[ModuleType, ModuleName]`; legacy servers accept
-    /// a single module name, so we mirror the `module.info` fallback.
+    /// Mirrors the `module.info` lookup logic (modern form first, legacy
+    /// single-name fallback reserved for servers that reject the modern one).
     pub fn module_options(&self, module_type: &str, name: &str) -> Result<MsgValue> {
         let leaf = strip_type_prefix(module_type, name);
         let modern = self.rpc_call(
@@ -235,18 +248,26 @@ impl MsfRpcClient {
             &[msg_str(module_type), msg_str(&leaf)],
             15,
         )?;
-        if response_error(&modern).is_none() {
-            return Ok(modern);
+        match response_error(&modern) {
+            None => Ok(modern),
+            Some(message) => {
+                if is_missing_module(&modern) {
+                    return Err(AppError::RpcModuleNotFound(message));
+                }
+                if looks_like_legacy_signature_error(&modern) {
+                    let legacy = self.rpc_call(
+                        "module.options",
+                        &[msg_str(&full_name(module_type, name))],
+                        15,
+                    )?;
+                    if let Some(legacy_message) = response_error(&legacy) {
+                        return Err(classify_lookup(&legacy_message));
+                    }
+                    return Ok(legacy);
+                }
+                Err(AppError::Rpc(message))
+            }
         }
-        let legacy = self.rpc_call(
-            "module.options",
-            &[msg_str(&full_name(module_type, name))],
-            15,
-        )?;
-        if let Some(message) = response_error(&legacy) {
-            return Err(classify_lookup(&message));
-        }
-        Ok(legacy)
     }
 
     /// List every module of the given RPC type currently loaded by the
@@ -427,6 +448,38 @@ fn classify_lookup(message: &str) -> AppError {
     } else {
         AppError::Rpc(message.to_string())
     }
+}
+
+/// True when an RPC error response is a *module lookup* failure rather than a
+/// transport or argument problem. MSF raises from `RPC_Module#_find_module`
+/// for missing modules, and its `error_message` mentions the module or "Invalid".
+fn is_missing_module(err: &MsgValue) -> bool {
+    let message = error_message(err);
+    let bar = err
+        .get("error_backtrace")
+        .and_then(MsgValue::as_array)
+        .is_some_and(|frames| {
+            frames
+                .iter()
+                .filter_map(MsgValue::as_str)
+                .any(|frame| frame.contains("_find_module"))
+        });
+    let lower = message.to_lowercase();
+    bar
+        || lower.contains("not found")
+        || lower.contains("does not exist")
+        || lower.contains("invalid module")
+        || lower.contains("module not found")
+        || lower.contains("missing module")
+}
+
+/// True when the server rejected the modern `[ModuleType, ModuleName]` shape
+/// itself (an argument-count error), which is the only case where the legacy
+/// single-name signature may still be required.
+fn looks_like_legacy_signature_error(err: &MsgValue) -> bool {
+    let message = err.get("error_string").and_then(MsgValue::as_str).unwrap_or("");
+    let lower = message.to_lowercase();
+    lower.contains("wrong number of arguments") || lower.contains("invalid message format")
 }
 
 /// Parse a `module.exploits` / `module.auxiliary` / `module.post` listing
@@ -761,6 +814,78 @@ mod tests {
             classify_lookup("Permission denied"),
             AppError::Rpc(_)
         ));
+    }
+
+    #[test]
+    fn is_missing_module_detects_backtrace_and_message() {
+        // The real payload MSF returns for a missing module: error_message
+        // "Invalid Module" and a backtrace rooted at _find_module.
+        let err = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_string", msg_str("Msf::RPC::Exception")),
+            (
+                "error_backtrace",
+                MsgValue::Array(vec![
+                    msg_str("lib/msf/core/rpc/v10/rpc_module.rb:743:in 'Msf::RPC::RPC_Module#_find_module'"),
+                    msg_str("lib/msf/core/rpc/v10/rpc_module.rb:218:in 'Msf::RPC::RPC_Module#rpc_info'"),
+                ]),
+            ),
+            ("error_message", msg_str("Invalid Module")),
+            ("error_code", MsgValue::Int(500)),
+        ]);
+        assert!(is_missing_module(&err));
+
+        // Same payload without the backtrace but with an explicit message.
+        let msg_only = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_message", msg_str("Module not found")),
+        ]);
+        assert!(is_missing_module(&msg_only));
+
+        // A genuine argument/transport failure must NOT look like a missing
+        // module.
+        let arg_err = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_string", msg_str("wrong number of arguments (given 1, expected 2)")),
+            ("error_message", msg_str("wrong number of arguments (given 1, expected 2)")),
+        ]);
+        assert!(!is_missing_module(&arg_err));
+        assert!(looks_like_legacy_signature_error(&arg_err));
+
+        // A modern-server module-not-found (no backtrace, but message only)
+        // is also not an argument-shape error.
+        assert!(!looks_like_legacy_signature_error(&msg_only));
+    }
+
+    #[test]
+    fn legacy_fallback_only_triggers_on_argument_shape_errors() {
+        // Simulate what a modern server returns for a missing module: the
+        // modern-form error is classified as not-found and never falls back to
+        // the legacy single-name signature.
+        let decision = |err: &MsgValue| {
+            if is_missing_module(err) {
+                return "not-found".to_string();
+            }
+            if looks_like_legacy_signature_error(err) {
+                return "legacy-retry".to_string();
+            }
+            "rpc-failure".to_string()
+        };
+
+        let modern_missing = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_message", msg_str("Invalid Module")),
+        ]);
+        assert_eq!(decision(&modern_missing), "not-found");
+
+        let modern_arg_error = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_string", msg_str("wrong number of arguments (given 2, expected 1)")),
+        ]);
+        assert_eq!(decision(&modern_arg_error), "legacy-retry");
+
+        let other = map_of(&[("error", MsgValue::Bool(true)), ("error_string", msg_str("Permission denied"))]);
+        assert_eq!(decision(&other), "rpc-failure");
     }
 
     #[test]
