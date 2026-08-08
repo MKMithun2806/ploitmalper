@@ -219,7 +219,11 @@ fn draw_picker(frame: &mut Frame<'_>, title: &str, rows: &[PickerRow], cursor: u
     };
     frame.render_widget(List::new(items), list_area);
 
-    let footer = format!(" {}/{}  ↑/k move ↓/j · space toggle · a all · n none · enter continue · q quit ", cursor + 1, rows.len());
+    let footer = format!(
+        " {}/{}  ↑/k move ↓/j · space toggle · a all · n none · enter continue · q quit ",
+        cursor + 1,
+        rows.len()
+    );
     frame.render_widget(
         Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray)))
             .alignment(Alignment::Center),
@@ -321,7 +325,11 @@ fn draw_viewer(
             for (k, value) in row.cells.iter().enumerate() {
                 if k == 0 {
                     line.push_str(&crate::frontend::truncate(value, 24));
-                } else if columns.get(k).map(|c| matches!(*c, "RANK" | "CONF" | "PORT")).unwrap_or(false) {
+                } else if columns
+                    .get(k)
+                    .map(|c| matches!(*c, "RANK" | "CONF" | "PORT"))
+                    .unwrap_or(false)
+                {
                     line.push_str(&format!("  {value:>8}"));
                 } else {
                     line.push_str(&format!("  {}", crate::frontend::truncate(value, 22)));
@@ -375,10 +383,7 @@ fn draw_viewer(
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(Span::styled(
-                        "detail",
-                        Style::default().fg(Color::DarkGray),
-                    )),
+                    .title(Span::styled("detail", Style::default().fg(Color::DarkGray))),
             )
             .style(Style::default().fg(Color::Gray)),
         Rect {

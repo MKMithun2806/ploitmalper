@@ -61,9 +61,15 @@ fn probe_live_metadata() {
         Ok(all) => {
             println!("\nLIST: {} modules total", all.len());
             let nginx: Vec<_> = all.iter().filter(|m| m.name.contains("nginx")).collect();
-            println!("nginx modules: {:?}", nginx.iter().map(|m| m.name.as_str()).collect::<Vec<_>>());
+            println!(
+                "nginx modules: {:?}",
+                nginx.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+            );
             let robots: Vec<_> = all.iter().filter(|m| m.name.contains("robots")).collect();
-            println!("robots modules: {:?}", robots.iter().map(|m| m.name.as_str()).collect::<Vec<_>>());
+            println!(
+                "robots modules: {:?}",
+                robots.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+            );
         }
         Err(e) => println!("LIST ERROR: {e}"),
     }

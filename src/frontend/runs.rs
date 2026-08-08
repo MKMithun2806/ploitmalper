@@ -101,14 +101,7 @@ fn short_id(stable_id: &str) -> String {
 }
 
 fn tui_runs(runs: &[ScanRun]) -> Result<()> {
-    let columns: &[&str] = &[
-        "RUN ID",
-        "TARGET",
-        "STARTED",
-        "ARTIFACTS",
-        "TOOLS",
-        "STATS",
-    ];
+    let columns: &[&str] = &["RUN ID", "TARGET", "STARTED", "ARTIFACTS", "TOOLS", "STATS"];
     let rows = runs
         .iter()
         .map(|run| {

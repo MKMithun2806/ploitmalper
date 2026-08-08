@@ -173,11 +173,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
     Ok(())
 }
 
-fn tui_findings(
-    selected: &[&Finding],
-    obs_index: &ObsIndex,
-    maps: &IdMaps,
-) -> Result<()> {
+fn tui_findings(selected: &[&Finding], obs_index: &ObsIndex, maps: &IdMaps) -> Result<()> {
     let columns: &[&str] = &[
         "SEVERITY",
         "TITLE",

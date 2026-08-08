@@ -602,7 +602,10 @@ mod tests {
         bytes.extend_from_slice(&encode(&MsgValue::String("Windows 7".into())));
         let decoded = decode(&bytes).unwrap();
         let map = decoded.as_map().unwrap();
-        assert_eq!(map.get("0"), Some(&MsgValue::String("Automatic Target".into())));
+        assert_eq!(
+            map.get("0"),
+            Some(&MsgValue::String("Automatic Target".into()))
+        );
         assert_eq!(map.get("1"), Some(&MsgValue::String("Windows 7".into())));
     }
 

@@ -465,8 +465,7 @@ fn is_missing_module(err: &MsgValue) -> bool {
                 .any(|frame| frame.contains("_find_module"))
         });
     let lower = message.to_lowercase();
-    bar
-        || lower.contains("not found")
+    bar || lower.contains("not found")
         || lower.contains("does not exist")
         || lower.contains("invalid module")
         || lower.contains("module not found")
@@ -477,7 +476,10 @@ fn is_missing_module(err: &MsgValue) -> bool {
 /// itself (an argument-count error), which is the only case where the legacy
 /// single-name signature may still be required.
 fn looks_like_legacy_signature_error(err: &MsgValue) -> bool {
-    let message = err.get("error_string").and_then(MsgValue::as_str).unwrap_or("");
+    let message = err
+        .get("error_string")
+        .and_then(MsgValue::as_str)
+        .unwrap_or("");
     let lower = message.to_lowercase();
     lower.contains("wrong number of arguments") || lower.contains("invalid message format")
 }
@@ -846,8 +848,14 @@ mod tests {
         // module.
         let arg_err = map_of(&[
             ("error", MsgValue::Bool(true)),
-            ("error_string", msg_str("wrong number of arguments (given 1, expected 2)")),
-            ("error_message", msg_str("wrong number of arguments (given 1, expected 2)")),
+            (
+                "error_string",
+                msg_str("wrong number of arguments (given 1, expected 2)"),
+            ),
+            (
+                "error_message",
+                msg_str("wrong number of arguments (given 1, expected 2)"),
+            ),
         ]);
         assert!(!is_missing_module(&arg_err));
         assert!(looks_like_legacy_signature_error(&arg_err));
@@ -880,11 +888,17 @@ mod tests {
 
         let modern_arg_error = map_of(&[
             ("error", MsgValue::Bool(true)),
-            ("error_string", msg_str("wrong number of arguments (given 2, expected 1)")),
+            (
+                "error_string",
+                msg_str("wrong number of arguments (given 2, expected 1)"),
+            ),
         ]);
         assert_eq!(decision(&modern_arg_error), "legacy-retry");
 
-        let other = map_of(&[("error", MsgValue::Bool(true)), ("error_string", msg_str("Permission denied"))]);
+        let other = map_of(&[
+            ("error", MsgValue::Bool(true)),
+            ("error_string", msg_str("Permission denied")),
+        ]);
         assert_eq!(decision(&other), "rpc-failure");
     }
 
