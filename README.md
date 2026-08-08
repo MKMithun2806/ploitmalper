@@ -16,6 +16,7 @@
 - **NVD CVE Enrichment**: Automatically fetches CVSS scores, severities, and descriptions from the NVD API with aggressive local caching.
 - **Metasploit Integration**: Connects via MSF-RPC to verify existing hosts in workspaces and match findings to live sessions.
 - **Automated Module Suggestions**: Analyzes service banners and titles against an internal expert system to suggest relevant Metasploit modules.
+- **Interactive TUI**: Terminal-native module picker (circular selector with arrow keys and space toggles) and scrollable table viewers for runs and findings.
 - **Payload Recipe Builder**: Generates ready-to-use `msfvenom` commands for various platforms (Windows, Linux, macOS, etc.).
 - **Flexible Reporting**: Produces clean, professional Markdown reports with summary tables and deep-dive findings.
 - **Intelligence Database**: Stores assets, services, findings, and observations from Malper scan artifacts in PocketBase or SQLite, with re-ingest deduplication and change tracking.
@@ -25,12 +26,11 @@
 
 ## Prerequisites
 
-PloitMalper leverages system utilities for lightweight HTTP transport:
-
 - **Rust 1.70+**
-- **curl**: Used for MSF-RPC and PocketBase communication.
 - **Metasploit Framework** (Recommended, for MSF-RPC integration).
 - **PocketBase** (Optional, for the remote intelligence database backend).
+
+All HTTP/TLS is handled natively via `rustls`; no curl or OpenSSL installation required.
 
 ---
 
@@ -116,6 +116,7 @@ ploit-malper process results.json
 | `runs` | List all recorded scan runs. |
 | `diff [run-a] [run-b]` | Compare two scan runs (defaults to the two most recent). |
 | `del <run_id>` | Delete a scan run and its observations and exploit executions. |
+| `exploit <run_id>` | Plan and run exploits from a scan run against an MSF-RPC framework. |
 | `setup` | Interactive wizard for MSF-RPC and NVD API configuration. |
 | `reset-config` | Wipe all stored credentials and local cache. |
 
@@ -157,6 +158,7 @@ All exploration commands are read-only. They share three flags:
 - `--verbose` / `-v` — print full record details (IDs, metadata, banners, before/after diffs).
 - `--json` — emit machine-readable JSON instead of the table view.
 - `--backend pocketbase|sqlite` — override the configured backend.
+- `--tui` — open an interactive terminal viewer (runs, findings). Only available on a real terminal; silently ignored in pipes.
 
 ### assets
 
@@ -196,6 +198,7 @@ ploit-malper findings
 ploit-malper findings --severity critical
 ploit-malper findings --cve CVE-2021-44228
 ploit-malper findings --fixed --asset 192.168.1.14
+ploit-malper findings --tui        # interactive scrollable viewer
 ```
 
 | Flag | Description |
@@ -223,6 +226,7 @@ Prints a chronological observation timeline for the given asset, service, or fin
 ```bash
 ploit-malper runs
 ploit-malper runs --verbose
+ploit-malper runs --tui            # interactive scrollable viewer
 ```
 
 Lists every scan run with target, start/finish times, artifact count, tools, and per-type record stats (`a:` assets, `s:` services, `f:` findings, `o:` observations).
@@ -245,6 +249,33 @@ ploit-malper del <run_id> --yes  # skip the confirmation prompt
 ```
 
 Deletes a scan run (matched by full id or unique prefix) together with the observations and exploit executions recorded under it. Assets, services, and findings are shared across runs and are left untouched. Use `ploit-malper runs` to list run ids first.
+
+### exploit
+
+```bash
+ploit-malper exploit <run_id>             # interactive module picker (on a tty)
+ploit-malper exploit <run_id> --dry-run   # preview plan, no execution
+ploit-malper exploit <run_id> --yes       # skip prompts, select all modules
+ploit-malper exploit <run_id> --module exploit/windows/smb/ms17_010_eternalblue
+```
+
+Plans and executes exploits from a scan run against a connected MSF-RPC instance. Steps:
+
+1. Resolves the run by id/unique-prefix, builds a module plan from findings.
+2. Connects to MSF-RPC and verifies each planned module exists on the instance (missing modules are marked skipped, auditable).
+3. Shows the verified plan and lets you select which modules to run (circular picker on a tty, classic checklist otherwise).
+4. Executes each selected step, records job/session/loot/error back to the database.
+
+| Flag | Description |
+| :--- | :--- |
+| `--dry-run` | Preview the plan without contacting the framework. |
+| `--yes` | Skip all prompts; select all modules and accept defaults. |
+| `--module NAME` | Only include modules whose name contains NAME. |
+| `--target HOST` | Only include steps targeting HOST. |
+| `--payload NAME` | Override the payload used for each step. |
+| `--workspace NAME` | Use a different MSF workspace than the configured one. |
+| `--job-timeout SECS` | Per-step execution timeout (default 300). |
+| `--verbose` | Print extra RPC diagnostics. |
 
 ---
 
