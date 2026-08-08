@@ -591,10 +591,6 @@ mod tests {
     fn decode_map_with_integer_keys() {
         // fixmap with 2 entries keyed by positive fixints:
         // { 0 => "Automatic Target", 1 => "Windows 7" }
-        let bytes = vec![
-            0x82, 0x00, 0xa2, 0x41, 0x42, // not real content below
-        ];
-        // Build properly: map(2): [int0, "Automatic Target", int1, "Windows 7"]
         let mut bytes = vec![0x82];
         bytes.push(0x00); // key 0
         bytes.extend_from_slice(&encode(&MsgValue::String("Automatic Target".into())));
