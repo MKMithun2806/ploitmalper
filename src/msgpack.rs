@@ -341,12 +341,22 @@ fn decode_map(bytes: &[u8], mut index: usize, len: usize) -> Result<(MsgValue, u
     for _ in 0..len {
         let (key_value, next_key) = decode_value(bytes, index)?;
         index = next_key;
-        let key = key_value
-            .as_str()
-            .ok_or_else(|| AppError::Msgpack("msgpack map key was not a string".to_string()))?;
+        let key = match &key_value {
+            MsgValue::String(value) => value.clone(),
+            MsgValue::UInt(value) => value.to_string(),
+            MsgValue::Int(value) => value.to_string(),
+            MsgValue::Float(value) => value.to_string(),
+            MsgValue::Bool(value) => value.to_string(),
+            MsgValue::Nil => String::new(),
+            _ => {
+                return Err(AppError::Msgpack(
+                    "msgpack map key was not a string".to_string(),
+                ));
+            }
+        };
         let (value, next_value) = decode_value(bytes, index)?;
         index = next_value;
-        map.insert(key.to_string(), value);
+        map.insert(key, value);
     }
     Ok((MsgValue::Map(map), index))
 }
@@ -575,6 +585,39 @@ mod tests {
             MsgValue::Float(f) => assert!((f - std::f64::consts::PI).abs() < 1e-15),
             _ => panic!("expected Float"),
         }
+    }
+
+    #[test]
+    fn decode_map_with_integer_keys() {
+        // fixmap with 2 entries keyed by positive fixints:
+        // { 0 => "Automatic Target", 1 => "Windows 7" }
+        let bytes = vec![
+            0x82, 0x00, 0xa2, 0x41, 0x42, // not real content below
+        ];
+        // Build properly: map(2): [int0, "Automatic Target", int1, "Windows 7"]
+        let mut bytes = vec![0x82];
+        bytes.push(0x00); // key 0
+        bytes.extend_from_slice(&encode(&MsgValue::String("Automatic Target".into())));
+        bytes.push(0x01); // key 1
+        bytes.extend_from_slice(&encode(&MsgValue::String("Windows 7".into())));
+        let decoded = decode(&bytes).unwrap();
+        let map = decoded.as_map().unwrap();
+        assert_eq!(map.get("0"), Some(&MsgValue::String("Automatic Target".into())));
+        assert_eq!(map.get("1"), Some(&MsgValue::String("Windows 7".into())));
+    }
+
+    #[test]
+    fn decode_map_with_negative_int_keys() {
+        // map(1, key=-1, "neg")
+        let mut bytes = vec![0x81];
+        bytes.push(0xff); // fixint -1
+        bytes.extend_from_slice(b"neg".as_slice()); // placeholder replaced below
+        let payload = encode(&MsgValue::String("neg".into()));
+        bytes.truncate(2);
+        bytes.extend_from_slice(&payload);
+        let decoded = decode(&bytes).unwrap();
+        let map = decoded.as_map().unwrap();
+        assert_eq!(map.get("-1"), Some(&MsgValue::String("neg".into())));
     }
 
     #[test]
