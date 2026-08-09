@@ -22,7 +22,7 @@ use crate::error::{AppError, Result};
 // ---------------------------------------------------------------------------
 
 const BOOLEAN_FLAGS: &[&str] = &[
-    "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes", "tui",
+    "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes", "tui", "include-info",
 ];
 const VALUE_FLAGS: &[&str] = &[
     "target",

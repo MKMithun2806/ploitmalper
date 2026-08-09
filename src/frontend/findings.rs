@@ -9,7 +9,7 @@ use crate::frontend::{
 pub fn usage() {
     println!(
         "Usage: ploit-malper findings [--tui] [--severity LEVEL] [--cve ID] [--asset TERM] [--new] \
-         [--fixed] [--since DATE] [--verbose] [--json] [--backend pocketbase|sqlite]"
+         [--fixed] [--since DATE] [--include-info] [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
 
@@ -36,9 +36,17 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
     };
 
     let severity_filter = parsed.get("severity").map(str::to_lowercase);
+    // Informational findings stay in the database but are hidden by default so
+    // the findings view surfaces real vulnerabilities; --include-info (or an
+    // explicit --severity info) opts in.
+    let info_requested = severity_filter.as_deref() == Some("info");
+    let include_info = parsed.has("include-info") || info_requested;
 
     let mut selected: Vec<&Finding> = Vec::new();
     for finding in &findings {
+        if !include_info && finding.severity.to_lowercase() == "info" {
+            continue;
+        }
         if let Some(wanted) = &severity_filter {
             if finding.severity.to_lowercase() != *wanted {
                 continue;
