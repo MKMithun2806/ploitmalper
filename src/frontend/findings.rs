@@ -3,13 +3,14 @@ use crate::db::models::Finding;
 use crate::error::{AppError, Result};
 use crate::frontend::{
     empty_result, fmt_ts, open_backend, parse_ts, print_json, severity_label, severity_rank,
-    severity_style, ts_since, Args, Cell, IdMaps, LifecycleFilter, ObsIndex, Table,
+    severity_style, ts_since, Args, Cell, IdMaps, LifecycleQuery, ObsIndex, Table,
 };
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper findings [--tui] [--severity LEVEL] [--cve ID] [--asset TERM] [--lifecycle STATE] \
-         [--new] [--fixed] [--since DATE] [--include-info] [--verbose] [--json] [--backend pocketbase|sqlite]"
+        "Usage: ploit-malper findings [--tui] [--severity LEVEL] [--cve ID] [--asset TERM] \
+         [--lifecycle STATE|--all] [--new] [--fixed] [--since DATE] [--include-info] [--verbose] \
+         [--json] [--backend pocketbase|sqlite]"
     );
 }
 
@@ -41,7 +42,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
     // explicit --severity info) opts in.
     let info_requested = severity_filter.as_deref() == Some("info");
     let include_info = parsed.has("include-info") || info_requested;
-    let lifecycle_filter = LifecycleFilter::parse_singleton(&parsed, true, true);
+    let lifecycle_query = LifecycleQuery::parse(&parsed, true, true)?;
 
     let mut selected: Vec<&Finding> = Vec::new();
     for finding in &findings {
@@ -75,11 +76,9 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
                 continue;
             }
         }
-        let state = obs_index.state(&finding.stable_id, &finding.status);
-        if let Some(filter) = lifecycle_filter {
-            if !filter.matches(state.into()) {
-                continue;
-            }
+        let lifecycle = obs_index.lifecycle(&finding.stable_id, &finding.status);
+        if !lifecycle_query.matches(lifecycle) {
+            continue;
         }
         selected.push(finding);
     }
@@ -114,7 +113,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
         "CHANGE".to_string(),
     ]);
     for finding in &selected {
-        let state = obs_index.state(&finding.stable_id, &finding.status);
+        let lifecycle = obs_index.lifecycle(&finding.stable_id, &finding.status);
         let title = if finding.cves.is_empty() {
             finding.title.clone()
         } else {
@@ -136,7 +135,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
             ),
             Cell::plain(fmt_ts(&finding.first_seen)),
             Cell::plain(fmt_ts(&finding.last_seen)),
-            Cell::plain(state.label().to_string()),
+            Cell::styled(lifecycle.label().to_string(), lifecycle_style(lifecycle)),
         ]);
     }
     println!("{}", table.render());
@@ -145,6 +144,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
         println!();
         for finding in &selected {
             let asset = maps.asset_name(&finding.asset_id);
+            let lifecycle = obs_index.lifecycle(&finding.stable_id, &finding.status);
             println!(
                 "{} ({})  [{}]",
                 crate::frontend::bold(&finding.title),
@@ -152,7 +152,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
                 finding.stable_id
             );
             println!(
-                "    asset={} service={} tool={} exploitability={} status={}",
+                "    asset={} service={} tool={} exploitability={} lifecycle={}",
                 asset,
                 finding
                     .service_id
@@ -161,7 +161,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
                     .unwrap_or_else(|| "-".to_string()),
                 finding.tool,
                 finding.exploitability.as_deref().unwrap_or("-"),
-                finding.status
+                lifecycle.label()
             );
             if !finding.cves.is_empty() {
                 println!("    cves={}", finding.cves.join(", "));
@@ -181,6 +181,15 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
     Ok(())
 }
 
+fn lifecycle_style(lifecycle: crate::frontend::Lifecycle) -> &'static str {
+    match lifecycle {
+        crate::frontend::Lifecycle::New => "32",
+        crate::frontend::Lifecycle::Changed => "33",
+        crate::frontend::Lifecycle::Removed => "31",
+        crate::frontend::Lifecycle::Active => "2",
+    }
+}
+
 fn tui_findings(selected: &[&Finding], obs_index: &ObsIndex, maps: &IdMaps) -> Result<()> {
     let columns: &[&str] = &[
         "SEVERITY",
@@ -193,7 +202,7 @@ fn tui_findings(selected: &[&Finding], obs_index: &ObsIndex, maps: &IdMaps) -> R
     ];
     let mut rows = Vec::with_capacity(selected.len());
     for finding in selected {
-        let state = obs_index.state(&finding.stable_id, &finding.status);
+        let lifecycle = obs_index.lifecycle(&finding.stable_id, &finding.status);
         let title = if finding.cves.is_empty() {
             finding.title.clone()
         } else {
@@ -210,7 +219,7 @@ fn tui_findings(selected: &[&Finding], obs_index: &ObsIndex, maps: &IdMaps) -> R
                 .unwrap_or_else(|| "-".to_string()),
             fmt_ts(&finding.first_seen),
             fmt_ts(&finding.last_seen),
-            state.label().to_string(),
+            lifecycle.label().to_string(),
         ]));
     }
     let _ = crate::frontend::tui::view_table("Findings", columns, rows)?;

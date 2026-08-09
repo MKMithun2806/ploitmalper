@@ -2,14 +2,14 @@ use crate::config::ConfigManager;
 use crate::db::models::Asset;
 use crate::error::{AppError, Result};
 use crate::frontend::{
-    bold, fmt_ts, open_backend, parse_ts, print_json, ts_since, Args, Cell, IdMaps,
-    LifecycleFilter, ObsIndex, Table,
+    bold, fmt_ts, open_backend, parse_ts, print_json, ts_since, Args, Cell, IdMaps, Lifecycle,
+    LifecycleQuery, ObsIndex, Table,
 };
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper assets [--lifecycle STATE] [--new] [--changed] [--since DATE] [--target TERM] \
-         [--verbose] [--json] [--backend pocketbase|sqlite]"
+        "Usage: ploit-malper assets [--lifecycle STATE|--all] [--new] [--changed] [--since DATE] \
+         [--target TERM] [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
 
@@ -35,7 +35,7 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
         None => None,
     };
 
-    let lifecycle_filter = LifecycleFilter::parse_singleton(&parsed, true, false);
+    let lifecycle_query = LifecycleQuery::parse(&parsed, true, false)?;
 
     let mut selected: Vec<&Asset> = Vec::new();
     for asset in &assets {
@@ -63,11 +63,9 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
                 continue;
             }
         }
-        let state = obs_index.state(&asset.stable_id, &asset.status);
-        if let Some(filter) = lifecycle_filter {
-            if !filter.matches(state.into()) {
-                continue;
-            }
+        let lifecycle = obs_index.lifecycle(&asset.stable_id, &asset.status);
+        if !lifecycle_query.matches(lifecycle) {
+            continue;
         }
         selected.push(asset);
     }
@@ -91,14 +89,14 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
         "CHANGE".to_string(),
     ]);
     for asset in &selected {
-        let state = obs_index.state(&asset.stable_id, &asset.status);
+        let lifecycle = obs_index.lifecycle(&asset.stable_id, &asset.status);
         table.add_row(vec![
             Cell::plain(asset.name.clone()),
             Cell::plain(asset.asset_type.clone()),
             Cell::plain(maps.service_summary(&asset.stable_id)),
             Cell::plain(fmt_ts(&asset.first_seen)),
             Cell::plain(fmt_ts(&asset.last_seen)),
-            Cell::styled(state.label().to_string(), state_style(state)),
+            Cell::styled(lifecycle.label().to_string(), lifecycle_style(lifecycle)),
         ]);
     }
     println!("{}", table.render());
@@ -133,11 +131,11 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
     Ok(())
 }
 
-fn state_style(state: crate::frontend::ChangeState) -> &'static str {
-    match state {
-        crate::frontend::ChangeState::New => "32",
-        crate::frontend::ChangeState::Changed => "33",
-        crate::frontend::ChangeState::Removed => "31",
-        crate::frontend::ChangeState::Unchanged => "2",
+fn lifecycle_style(lifecycle: Lifecycle) -> &'static str {
+    match lifecycle {
+        Lifecycle::New => "32",
+        Lifecycle::Changed => "33",
+        Lifecycle::Removed => "31",
+        Lifecycle::Active => "2",
     }
 }

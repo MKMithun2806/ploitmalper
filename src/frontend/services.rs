@@ -2,14 +2,14 @@ use crate::config::ConfigManager;
 use crate::db::models::Service;
 use crate::error::Result;
 use crate::frontend::{
-    empty_result, fmt_ts, open_backend, print_json, Args, Cell, IdMaps, LifecycleFilter, ObsIndex,
+    empty_result, fmt_ts, open_backend, print_json, Args, Cell, IdMaps, LifecycleQuery, ObsIndex,
     Table,
 };
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper services [--port N] [--product TERM] [--asset TERM] [--lifecycle STATE] \
-         [--verbose] [--json] [--backend pocketbase|sqlite]"
+        "Usage: ploit-malper services [--port N] [--product TERM] [--asset TERM] \
+         [--lifecycle STATE|--all] [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
 
@@ -39,7 +39,7 @@ pub fn cmd_services(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
         None => None,
     };
 
-    let lifecycle_filter = LifecycleFilter::parse_singleton(&parsed, false, false);
+    let lifecycle_query = LifecycleQuery::parse(&parsed, false, false)?;
 
     let mut selected: Vec<&Service> = Vec::new();
     for service in &services {
@@ -73,11 +73,9 @@ pub fn cmd_services(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
                 continue;
             }
         }
-        let state = obs_index.state(&service.stable_id, &service.status);
-        if let Some(filter) = lifecycle_filter {
-            if !filter.matches(state.into()) {
-                continue;
-            }
+        let lifecycle = obs_index.lifecycle(&service.stable_id, &service.status);
+        if !lifecycle_query.matches(lifecycle) {
+            continue;
         }
         selected.push(service);
     }
@@ -103,7 +101,7 @@ pub fn cmd_services(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
         "CHANGE".to_string(),
     ]);
     for service in &selected {
-        let state = obs_index.state(&service.stable_id, &service.status);
+        let lifecycle = obs_index.lifecycle(&service.stable_id, &service.status);
         let product_version = match (&service.product, &service.version) {
             (Some(p), Some(v)) => format!("{} {}", p, v),
             (Some(p), None) => p.clone(),
@@ -122,7 +120,7 @@ pub fn cmd_services(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
             Cell::plain(product_version),
             Cell::plain(fmt_ts(&service.first_seen)),
             Cell::plain(fmt_ts(&service.last_seen)),
-            Cell::plain(state.label().to_string()),
+            Cell::plain(lifecycle.label().to_string()),
         ]);
     }
     println!("{}", table.render());

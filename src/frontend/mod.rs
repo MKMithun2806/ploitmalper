@@ -23,7 +23,7 @@ use crate::error::{AppError, Result};
 
 const BOOLEAN_FLAGS: &[&str] = &[
     "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes", "tui", "include-info",
-    "all", "assets",
+    "all",
 ];
 const VALUE_FLAGS: &[&str] = &[
     "target",
@@ -646,6 +646,17 @@ impl From<ChangeState> for Lifecycle {
     }
 }
 
+impl From<LifecycleFilter> for Lifecycle {
+    fn from(filter: LifecycleFilter) -> Self {
+        match filter {
+            LifecycleFilter::New => Lifecycle::New,
+            LifecycleFilter::Active => Lifecycle::Active,
+            LifecycleFilter::Changed => Lifecycle::Changed,
+            LifecycleFilter::Removed => Lifecycle::Removed,
+        }
+    }
+}
+
 pub fn classify_kind(kind: &str) -> ChangeState {
     if kind.ends_with("_discovered") {
         ChangeState::New
@@ -945,35 +956,20 @@ pub enum LifecycleFilter {
 }
 
 impl LifecycleFilter {
-    /// Parse a CLI lifecycle term; legacy singletons (`--new`, `--fixed`) map
-    /// to the equivalent lifecycle so all commands share one query model.
-    pub fn parse_singleton(args: &Args, override_new: bool, override_fixed: bool) -> Option<Self> {
-        if let Some(raw) = args.get("lifecycle").or_else(|| args.get("status")) {
-            return Self::parse_term(raw);
-        }
-        if override_new && args.has("new") {
-            return Some(LifecycleFilter::New);
-        }
-        if args.has("assets") {
-            return None;
-        }
-        if override_fixed && args.has("fixed") {
-            return Some(LifecycleFilter::Removed);
-        }
-        if args.has("changed") {
-            return Some(LifecycleFilter::Changed);
-        }
-        None
-    }
-
-    /// Parse a lifecycle term to a filter, or `None` for unknown spellings.
-    pub fn parse_term(raw: &str) -> Option<Self> {
+    /// Parse a lifecycle term to a filter. Returns a clear error for
+    /// unrecognised spellings so commands fail loudly instead of silently
+    /// showing nothing.
+    pub fn parse_term(raw: &str) -> Result<Self> {
         match raw.to_lowercase().as_str() {
-            "new" => Some(LifecycleFilter::New),
-            "active" | "unchanged" => Some(LifecycleFilter::Active),
-            "changed" => Some(LifecycleFilter::Changed),
-            "removed" | "fixed" => Some(LifecycleFilter::Removed),
-            _ => None,
+            "new" => Ok(LifecycleFilter::New),
+            "active" | "unchanged" => Ok(LifecycleFilter::Active),
+            "changed" => Ok(LifecycleFilter::Changed),
+            "removed" | "fixed" => Ok(LifecycleFilter::Removed),
+            other => Err(AppError::Message(format!(
+                "unknown lifecycle '{}' (use one of: {})",
+                other,
+                LIFECYCLE_NAMES.join(", ")
+            ))),
         }
     }
 
@@ -987,6 +983,67 @@ impl LifecycleFilter {
     }
 }
 
+/// The lifecycle view requested by the CLI. This is the single query model
+/// shared by the list commands (findings, assets, services): `--all` requests
+/// every lifecycle including removed/fixed; the default view hides long-gone
+/// records; an explicit `--lifecycle`/`--status`/legacy singleton restricts to
+/// one state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleQuery {
+    /// Show every lifecycle state, including removed/fixed (`--all`).
+    All,
+    /// Restrict to one lifecycle state (`--lifecycle`/`--status`/`--new`/…).
+    Filtered(LifecycleFilter),
+    /// Default view: every record except removed/fixed.
+    Default,
+}
+
+impl LifecycleQuery {
+    /// Parse the shared query from CLI args. Legacy singletons (`--new`,
+    /// `--fixed`, `--changed`) map to the equivalent lifecycle so all commands
+    /// share one query model; `override_new`/`override_fixed` scope whether a
+    /// view supports the `--new`/`--fixed` spellings.
+    pub fn parse(args: &Args, override_new: bool, override_fixed: bool) -> Result<Self> {
+        if let Some(raw) = args.get("lifecycle").or_else(|| args.get("status")) {
+            return Ok(LifecycleQuery::Filtered(LifecycleFilter::parse_term(raw)?));
+        }
+        if args.has("all") {
+            return Ok(LifecycleQuery::All);
+        }
+        if override_new && args.has("new") {
+            return Ok(LifecycleQuery::Filtered(LifecycleFilter::New));
+        }
+        if override_fixed && args.has("fixed") {
+            return Ok(LifecycleQuery::Filtered(LifecycleFilter::Removed));
+        }
+        if args.has("changed") {
+            return Ok(LifecycleQuery::Filtered(LifecycleFilter::Changed));
+        }
+        Ok(LifecycleQuery::Default)
+    }
+
+    pub fn matches(&self, lifecycle: Lifecycle) -> bool {
+        match self {
+            LifecycleQuery::All => true,
+            LifecycleQuery::Filtered(filter) => filter.matches(lifecycle),
+            LifecycleQuery::Default => lifecycle != Lifecycle::Removed,
+        }
+    }
+
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            LifecycleQuery::All => Some("all"),
+            LifecycleQuery::Filtered(filter) => match filter {
+                LifecycleFilter::New => Some("new"),
+                LifecycleFilter::Active => Some("active"),
+                LifecycleFilter::Changed => Some("changed"),
+                LifecycleFilter::Removed => Some("removed"),
+            },
+            LifecycleQuery::Default => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
@@ -994,18 +1051,18 @@ mod lifecycle_tests {
     #[test]
     fn lifecycle_terms_alias() {
         assert_eq!(
-            LifecycleFilter::parse_term("active"),
-            Some(LifecycleFilter::Active)
+            LifecycleFilter::parse_term("active").unwrap(),
+            LifecycleFilter::Active
         );
         assert_eq!(
-            LifecycleFilter::parse_term("unchanged"),
-            Some(LifecycleFilter::Active)
+            LifecycleFilter::parse_term("unchanged").unwrap(),
+            LifecycleFilter::Active
         );
         assert_eq!(
-            LifecycleFilter::parse_term("fixed"),
-            Some(LifecycleFilter::Removed)
+            LifecycleFilter::parse_term("fixed").unwrap(),
+            LifecycleFilter::Removed
         );
-        assert_eq!(LifecycleFilter::parse_term("bogus"), None);
+        assert!(LifecycleFilter::parse_term("bogus").is_err());
     }
 
     #[test]
@@ -1018,16 +1075,66 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn query_default_hides_removed() {
+        let none = Args::parse(&[]).unwrap();
+        let query = LifecycleQuery::parse(&none, true, false).unwrap();
+        assert_eq!(query, LifecycleQuery::Default);
+        assert!(query.matches(Lifecycle::New));
+        assert!(query.matches(Lifecycle::Active));
+        assert!(query.matches(Lifecycle::Changed));
+        assert!(!query.matches(Lifecycle::Removed));
+    }
+
+    #[test]
+    fn all_flag_includes_removed() {
+        let all = Args::parse(&["--all".to_string()]).unwrap();
+        let query = LifecycleQuery::parse(&all, true, false).unwrap();
+        assert_eq!(query, LifecycleQuery::All);
+        assert!(query.matches(Lifecycle::Removed));
+    }
+
+    #[test]
+    fn lifecycle_and_status_are_interchangeable() {
+        let by_lifecycle = Args::parse(&["--lifecycle".to_string(), "new".to_string()]).unwrap();
+        let by_status = Args::parse(&["--status".to_string(), "new".to_string()]).unwrap();
+        assert_eq!(
+            LifecycleQuery::parse(&by_lifecycle, true, false).unwrap(),
+            LifecycleQuery::Filtered(LifecycleFilter::New)
+        );
+        assert_eq!(
+            LifecycleQuery::parse(&by_status, true, false).unwrap(),
+            LifecycleQuery::Filtered(LifecycleFilter::New)
+        );
+        assert!(LifecycleQuery::parse(&by_lifecycle, true, false)
+            .unwrap()
+            .matches(Lifecycle::New));
+    }
+
+    #[test]
     fn singleton_flags_map() {
         let new = Args::parse(&["--new".to_string()]).unwrap();
         assert_eq!(
-            LifecycleFilter::parse_singleton(&new, true, false),
-            Some(LifecycleFilter::New)
+            LifecycleQuery::parse(&new, true, false).unwrap(),
+            LifecycleQuery::Filtered(LifecycleFilter::New)
         );
         let changed = Args::parse(&["--changed".to_string()]).unwrap();
         assert_eq!(
-            LifecycleFilter::parse_singleton(&changed, true, false),
-            Some(LifecycleFilter::Changed)
+            LifecycleQuery::parse(&changed, true, false).unwrap(),
+            LifecycleQuery::Filtered(LifecycleFilter::Changed)
+        );
+        let fixed = Args::parse(&["--fixed".to_string()]).unwrap();
+        assert_eq!(
+            LifecycleQuery::parse(&fixed, false, true).unwrap(),
+            LifecycleQuery::Filtered(LifecycleFilter::Removed)
+        );
+    }
+
+    #[test]
+    fn legacy_new_flag_is_ignored_when_unscoped() {
+        let new = Args::parse(&["--new".to_string()]).unwrap();
+        assert_eq!(
+            LifecycleQuery::parse(&new, false, false).unwrap(),
+            LifecycleQuery::Default
         );
     }
 }
