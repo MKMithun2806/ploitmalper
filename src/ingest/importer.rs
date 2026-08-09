@@ -637,10 +637,13 @@ fn correlate_service(
     fallback_port: u16,
     fallback_name: &str,
 ) -> Option<String> {
-    let endpoint_port = target_url.and_then(|url| {
-        crate::engine::dedup::parse_endpoint_parts(url).port
-    });
-    let port = endpoint_port.or(if fallback_port == 0 { None } else { Some(fallback_port) })?;
+    let endpoint_port =
+        target_url.and_then(|url| crate::engine::dedup::parse_endpoint_parts(url).port);
+    let port = endpoint_port.or(if fallback_port == 0 {
+        None
+    } else {
+        Some(fallback_port)
+    })?;
 
     let base_name = if let Some(url) = target_url {
         let parts = crate::engine::dedup::parse_endpoint_parts(url);
@@ -1019,13 +1022,9 @@ fn import_vulnmalper_json(artifact: &Artifact, ctx: &mut BuildContext) -> Result
                 .target_url
                 .clone()
                 .or_else(|| (!url.is_empty()).then(|| url.clone()));
-            if let Some(service_key) = correlate_service(
-                ctx,
-                &asset_id,
-                finding_url.as_deref(),
-                port,
-                &service_name,
-            ) {
+            if let Some(service_key) =
+                correlate_service(ctx, &asset_id, finding_url.as_deref(), port, &service_name)
+            {
                 finding.service_id = Some(service_key);
             }
             if !url.is_empty() {
@@ -1698,12 +1697,23 @@ mod tests {
         // The host default would be port 445 (SMB)...
         let smb = correlate_service(&mut ctx, &asset_id, None, 445, "smb");
         // ...but an explicit endpoint port on the finding must win.
-        let web = correlate_service(&mut ctx, &asset_id, Some("http://192.168.1.50:8080/"), 445, "smb");
+        let web = correlate_service(
+            &mut ctx,
+            &asset_id,
+            Some("http://192.168.1.50:8080/"),
+            445,
+            "smb",
+        );
         assert!(smb.is_some());
         assert!(web.is_some());
         assert_ne!(smb, web);
         assert!(ctx.services.get(web.as_ref().unwrap()).map(|s| s.port) == Some(8080));
-        assert!(ctx.services.get(web.as_ref().unwrap()).map(|s| s.service_name.clone()) == Some("http".to_string()));
+        assert!(
+            ctx.services
+                .get(web.as_ref().unwrap())
+                .map(|s| s.service_name.clone())
+                == Some("http".to_string())
+        );
     }
 
     #[test]

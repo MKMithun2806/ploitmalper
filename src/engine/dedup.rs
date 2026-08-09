@@ -74,7 +74,11 @@ pub fn parse_endpoint_parts(value: &str) -> EndpointParts {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (path_and_query.to_string(), String::new()),
     };
-    let path = if path.is_empty() { "/".to_string() } else { path };
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        path
+    };
 
     let (host, port) = parse_authority(authority);
     EndpointParts {
@@ -92,9 +96,7 @@ fn parse_authority(authority: &str) -> (String, Option<u16>) {
         if let Some(close) = rest.find(']') {
             let host = rest[..close].to_string();
             let after = &rest[close + 1..];
-            let port = after
-                .strip_prefix(':')
-                .and_then(|p| p.parse::<u16>().ok());
+            let port = after.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
             return (host, port);
         }
     }
@@ -456,10 +458,7 @@ mod tests {
 
     #[test]
     fn collapses_pipe_framed_titles_into_same_identity() {
-        let records = vec![
-            record("GET / |", "10.0.0.1"),
-            record("GET / ", "10.0.0.1"),
-        ];
+        let records = vec![record("GET / |", "10.0.0.1"), record("GET / ", "10.0.0.1")];
         let result = deduplicate_records(records);
         assert_eq!(result.unique_count, 1);
         assert_eq!(result.records[0].merged_count, 2);
