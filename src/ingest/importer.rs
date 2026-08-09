@@ -620,10 +620,58 @@ fn push_endpoint(metadata: &mut Value, url: &str) {
     }
 }
 
+/// Correlate a finding (or endpoint) with the service that actually hosts it.
+///
+/// Priority order:
+/// 1. explicit endpoint port parsed from the target URL (highest confidence)
+/// 2. the discovered service record on that port for the asset
+/// 3. the scheme-derived protocol (http/https -> tcp)
+/// 4. fallback to the host's service port/name when no endpoint is explicit
+///
+/// A finding must never silently inherit a *different* service (e.g. an
+/// HTTP finding landing on 445/tcp) just because both share the asset.
+fn correlate_service(
+    ctx: &mut BuildContext,
+    asset_id: &str,
+    target_url: Option<&str>,
+    fallback_port: u16,
+    fallback_name: &str,
+) -> Option<String> {
+    let endpoint_port = target_url.and_then(|url| {
+        crate::engine::dedup::parse_endpoint_parts(url).port
+    });
+    let port = endpoint_port.or(if fallback_port == 0 { None } else { Some(fallback_port) })?;
+
+    let base_name = if let Some(url) = target_url {
+        let parts = crate::engine::dedup::parse_endpoint_parts(url);
+        if !parts.scheme.is_empty() {
+            parts.scheme
+        } else if !fallback_name.is_empty() {
+            fallback_name.to_string()
+        } else {
+            "http".to_string()
+        }
+    } else if !fallback_name.is_empty() {
+        fallback_name.to_string()
+    } else {
+        "http".to_string()
+    };
+
+    ctx.ensure_service(asset_id, port, "tcp", &base_name);
+    let key = service_id(asset_id, port, "tcp");
+    if let Some(service) = ctx.services.get_mut(&key) {
+        if service.service_name == "unknown" || service.service_name.is_empty() {
+            service.service_name = base_name;
+        }
+    }
+    Some(key)
+}
+
 // ---------------------------------------------------------------------------
 // World-state building
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 struct BuildContext {
     assets: HashMap<String, Asset>,
     services: HashMap<String, Service>,
@@ -964,7 +1012,22 @@ fn import_vulnmalper_json(artifact: &Artifact, ctx: &mut BuildContext) -> Result
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .filter(|s| !s.is_empty());
-            finding.service_id = Some(service_key.clone());
+            // Correlate the finding with the service that actually hosts it,
+            // preferring the explicit endpoint port over the host default so
+            // e.g. an HTTP finding never inherits the SMB 445/tcp service.
+            let finding_url = finding
+                .target_url
+                .clone()
+                .or_else(|| (!url.is_empty()).then(|| url.clone()));
+            if let Some(service_key) = correlate_service(
+                ctx,
+                &asset_id,
+                finding_url.as_deref(),
+                port,
+                &service_name,
+            ) {
+                finding.service_id = Some(service_key);
+            }
             if !url.is_empty() {
                 finding.endpoints.push(url.clone());
             }
@@ -1049,6 +1112,19 @@ fn import_vulnmalper_markdown(artifact: &Artifact, ctx: &mut BuildContext) -> Re
         if !current_url.is_empty() {
             finding.target_url = Some(current_url.clone());
             finding.endpoints.push(current_url.clone());
+        }
+        if let Some(service_key) = correlate_service(
+            ctx,
+            &asset_id,
+            if current_url.is_empty() {
+                None
+            } else {
+                Some(current_url.as_str())
+            },
+            0,
+            "http",
+        ) {
+            finding.service_id = Some(service_key);
         }
         ctx.findings.insert(finding.stable_id.clone(), finding);
     }
@@ -1612,6 +1688,22 @@ mod tests {
         assert_eq!(port_from_host_url("https://example.com/path", None), None);
         let port_value = json!(22);
         assert_eq!(port_from_host_url("x", Some(&port_value)), Some(22));
+    }
+
+    #[test]
+    fn correlate_http_finding_to_its_own_service() {
+        let mut ctx = BuildContext::default();
+        ctx.ensure_asset("http://192.168.1.50/");
+        let asset_id = sha256_hex(&format!("asset:{}", "http://192.168.1.50/"));
+        // The host default would be port 445 (SMB)...
+        let smb = correlate_service(&mut ctx, &asset_id, None, 445, "smb");
+        // ...but an explicit endpoint port on the finding must win.
+        let web = correlate_service(&mut ctx, &asset_id, Some("http://192.168.1.50:8080/"), 445, "smb");
+        assert!(smb.is_some());
+        assert!(web.is_some());
+        assert_ne!(smb, web);
+        assert!(ctx.services.get(web.as_ref().unwrap()).map(|s| s.port) == Some(8080));
+        assert!(ctx.services.get(web.as_ref().unwrap()).map(|s| s.service_name.clone()) == Some("http".to_string()));
     }
 
     #[test]
