@@ -6,6 +6,126 @@ use sha2::{Digest, Sha256};
 use crate::analyze::extract_endpoint;
 use crate::models::{DedupResult, ScanRecord};
 
+/// Structured endpoint parts parsed from a raw URL/path so fingerprinting is
+/// immune to scheme, casing, and host-framing noise.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EndpointParts {
+    pub scheme: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub path: String,
+    pub query: String,
+}
+
+/// Normalize a target for comparison so `http://h/` and `http://h` merge,
+/// while a distinct path keeps records separated.
+pub fn normalize_target(target: &str) -> String {
+    let lower = target.trim().to_lowercase();
+    let stripped = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    let mut host = stripped.trim_end_matches('/').to_string();
+
+    // Keep the path portion so `/`, `/index.html` and `/admin` stay distinct.
+    let host_part;
+    if let Some(idx) = host.find('/') {
+        host_part = host[..idx].to_string();
+    } else {
+        host_part = host.clone();
+        host = host_part.clone();
+    }
+    if host_part.is_empty() {
+        return host.clone();
+    }
+
+    // Strip a `:port` suffix unless this is an IPv6 literal.
+    if host_part.parse::<std::net::Ipv6Addr>().is_err() {
+        if let Some(colon) = host_part.rfind(':') {
+            let after = &host_part[colon + 1..];
+            if !after.is_empty() && after.chars().all(|c| c.is_ascii_digit()) {
+                let rest = &host[host_part.len()..];
+                return format!("{}{}", &host_part[..colon], rest);
+            }
+        }
+    }
+    host
+}
+
+/// Parse an endpoint (URL or path) into structured components. Safe on
+/// arbitrary scanner output: any malformed input degrades to empty parts.
+pub fn parse_endpoint_parts(value: &str) -> EndpointParts {
+    let value = value.trim();
+    if value.is_empty() {
+        return EndpointParts::default();
+    }
+
+    let (scheme, rest) = match value.split_once("://") {
+        Some((scheme, rest)) => (scheme.to_lowercase(), rest),
+        None => (String::new(), value),
+    };
+
+    let (authority, path_and_query) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, ""),
+    };
+
+    let (path, query) = match path_and_query.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (path_and_query.to_string(), String::new()),
+    };
+    let path = if path.is_empty() { "/".to_string() } else { path };
+
+    let (host, port) = parse_authority(authority);
+    EndpointParts {
+        scheme,
+        host,
+        port,
+        path,
+        query,
+    }
+}
+
+fn parse_authority(authority: &str) -> (String, Option<u16>) {
+    // IPv6 literal like `[::1]:8080`.
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some(close) = rest.find(']') {
+            let host = rest[..close].to_string();
+            let after = &rest[close + 1..];
+            let port = after
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok());
+            return (host, port);
+        }
+    }
+    if let Some(colon) = authority.rfind(':') {
+        if let Ok(port) = authority[colon + 1..].parse::<u16>() {
+            return (authority[..colon].to_string(), Some(port));
+        }
+    }
+    (authority.to_string(), None)
+}
+
+/// First parameter name in a query string, used to fingerprint injectable
+/// endpoints neutrally (param name, not value).
+fn first_parameter(query: &str) -> Option<String> {
+    let first = query.split('&').next()?;
+    let key = first.split('=').next()?.trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
+}
+
+fn normalize_key(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 /// Normalize a finding title for deduplication:
 ///
 /// * strip leading HTTP method prefixes (`GET`, `POST`, ...)
@@ -41,27 +161,75 @@ pub fn normalize_title(title: &str) -> String {
     // Collapse whitespace.
     text = text.split_whitespace().collect::<Vec<_>>().join(" ");
 
+    // Collapse `|`-framed scanner output: treat `|` as a pure segment
+    // separator and drop empty segments, so `"GET / |"` and `"GET / "`
+    // frame the same finding. Meaningful non-empty segments are preserved.
+    text = text
+        .split('|')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("|");
+
     // Strip trailing punctuation and path separators, then re-trim.
     text = text
-        .trim_end_matches(|c: char| ".,:;\\/".contains(c))
+        .trim_matches(|c: char| ".,:;\\/|".contains(c))
         .trim()
         .to_string();
 
     text
 }
 
-fn composite_key(record: &ScanRecord) -> String {
-    let target = normalize_target(&record.target);
+/// Stable structured fingerprint for a record, built from normalized fields
+/// (asset, service/port, type, endpoint path and parameter) rather than from
+/// raw, framing-prone scanner strings. Empty optional fields are dropped so a
+/// record that simply lacks a port/service never accidentally forks identity.
+fn fingerprint_segments(record: &ScanRecord) -> Vec<String> {
+    let mut segments = vec![normalize_target(&record.target)];
+
+    if let Some(port) = record.port {
+        segments.push(format!("port:{}", port));
+    }
+    if let Some(service) = record.service.as_deref() {
+        let service = normalize_key(service);
+        if !service.is_empty() {
+            segments.push(format!("service:{}", service));
+        }
+    }
+
     let normalized = normalize_title(&record.title);
-    let raw = format!("{}|{}", target, normalized);
+    if !normalized.is_empty() {
+        segments.push(format!("type:{}", normalized));
+    }
+
+    if let Some(endpoint) = extract_endpoint(record) {
+        let parts = parse_endpoint_parts(&endpoint);
+        // Trim framing delimiters off the path so `...CSP` and `...CSP:` and
+        // `/admin/` merge, while genuinely different paths stay distinct.
+        let path = normalize_path(&parts.path);
+        if !path.is_empty() {
+            segments.push(format!("path:{}", path));
+        }
+        if let Some(param) = first_parameter(&parts.query) {
+            segments.push(format!("param:{}", param));
+        }
+    }
+
+    segments
+}
+
+fn normalize_path(path: &str) -> String {
+    path.trim()
+        .trim_end_matches(|c: char| ".,:;\\/|".contains(c))
+        .trim()
+        .to_lowercase()
+}
+
+fn composite_key(record: &ScanRecord) -> String {
+    let raw = fingerprint_segments(record).join("|");
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
     format!("{:x}", hasher.finalize())
-}
-
-/// Normalize the target for comparison so `http://h/` and `http://h` merge.
-fn normalize_target(target: &str) -> String {
-    target.trim().trim_end_matches('/').to_lowercase()
 }
 
 pub fn deduplicate_records(records: Vec<ScanRecord>) -> DedupResult {
@@ -284,5 +452,52 @@ mod tests {
             vec!["Apache version", "APACHE VERSION"]
         );
         assert_eq!(result.records[0].merged_count, 2);
+    }
+
+    #[test]
+    fn collapses_pipe_framed_titles_into_same_identity() {
+        let records = vec![
+            record("GET / |", "10.0.0.1"),
+            record("GET / ", "10.0.0.1"),
+        ];
+        let result = deduplicate_records(records);
+        assert_eq!(result.unique_count, 1);
+        assert_eq!(result.records[0].merged_count, 2);
+    }
+
+    #[test]
+    fn structured_fingerprint_parts() {
+        let parts = parse_endpoint_parts("https://example.com:8443/admin?a=1&b=2");
+        assert_eq!(parts.scheme, "https");
+        assert_eq!(parts.host, "example.com");
+        assert_eq!(parts.port, Some(8443));
+        assert_eq!(parts.path, "/admin");
+        assert_eq!(parts.query, "a=1&b=2");
+
+        let ipv6 = parse_endpoint_parts("[::1]:8080/x");
+        assert_eq!(ipv6.host, "::1");
+        assert_eq!(ipv6.port, Some(8080));
+        assert_eq!(ipv6.path, "/x");
+    }
+
+    #[test]
+    fn same_title_different_ports_stay_separate() {
+        let mut a = record("/: Apache", "10.0.0.1");
+        a.port = Some(80);
+        a.service = Some("http".into());
+        let mut b = record("/: Apache", "10.0.0.1");
+        b.port = Some(8080);
+        b.service = Some("http".into());
+        let result = deduplicate_records(vec![a, b]);
+        assert_eq!(result.unique_count, 2);
+    }
+
+    #[test]
+    fn normalization_is_case_and_scheme_insensitive() {
+        let a = record("Apache version", "http://10.0.0.1/");
+        let b = record("APACHE VERSION", "10.0.0.1:80");
+        let result = deduplicate_records(vec![a, b]);
+        assert_eq!(result.unique_count, 1);
+        assert_eq!(result.removed_count, 1);
     }
 }

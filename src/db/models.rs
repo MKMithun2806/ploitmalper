@@ -131,8 +131,15 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Build a finding with a stable identity.
+    ///
+    /// The identity key deliberately folds only scanner *framing* differences
+    /// (surrounding whitespace, repeated/pipe-separated delimiters) so that the
+    /// same logical finding never forks into two database rows across scans.
+    /// Case and spelling are left untouched so previously imported rows keep
+    /// their existing stable_id (backward compatibility).
     pub fn new(asset_id: &str, tool: &str, title: &str) -> Self {
-        let key = format!("{}:{}:{}", asset_id, tool, title);
+        let key = format!("{}:{}:{}", asset_id, tool, stable_title_identity(title));
         let mut finding = Self {
             stable_id: stable_id("finding", &key),
             asset_id: asset_id.to_string(),
@@ -147,6 +154,23 @@ impl Finding {
         finding.status = ASSET_ACTIVE.to_string();
         finding
     }
+}
+
+/// Collapse scanner framing around a finding title for identity purposes:
+/// surrounding whitespace, consecutive delimiters (`|`, `/`, `:`), and any
+/// stray pipe-separated empty fields. Content and case are preserved.
+fn stable_title_identity(title: &str) -> String {
+    let collapsed = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let parts: Vec<&str> = collapsed
+        .split('|')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let joined = parts.join("|");
+    joined
+        .trim_end_matches(|c: char| ".,:;\\/|".contains(c))
+        .trim()
+        .to_string()
 }
 
 /// A historical observation recording how intelligence changed across runs.
@@ -287,5 +311,35 @@ impl ExploitExecution {
             selected: false,
             created_at: now,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finding_identity_is_stable_across_framing() {
+        let a = Finding::new("asset", "nmap", "Apache Version /");
+        let b = Finding::new("asset", "nmap", "Apache Version | ");
+        assert_eq!(a.stable_id, b.stable_id);
+        let c = Finding::new("asset", "nmap", "Apache Version");
+        assert_eq!(a.stable_id, c.stable_id);
+    }
+
+    #[test]
+    fn finding_identity_keeps_distinct_titles_separate() {
+        let a = Finding::new("asset", "nmap", "Apache 2.4");
+        let b = Finding::new("asset", "nmap", "Apache 2.2");
+        assert_ne!(a.stable_id, b.stable_id);
+    }
+
+    #[test]
+    fn finding_identity_is_scoped_by_tool_and_asset() {
+        let a = Finding::new("asset", "nmap", "Apache");
+        let b = Finding::new("asset", "nikto", "Apache");
+        let c = Finding::new("asset2", "nmap", "Apache");
+        assert_ne!(a.stable_id, b.stable_id);
+        assert_ne!(a.stable_id, c.stable_id);
     }
 }
