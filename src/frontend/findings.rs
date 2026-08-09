@@ -3,13 +3,13 @@ use crate::db::models::Finding;
 use crate::error::{AppError, Result};
 use crate::frontend::{
     empty_result, fmt_ts, open_backend, parse_ts, print_json, severity_label, severity_rank,
-    severity_style, ts_since, Args, Cell, ChangeState, IdMaps, ObsIndex, Table,
+    severity_style, ts_since, Args, Cell, IdMaps, LifecycleFilter, ObsIndex, Table,
 };
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper findings [--tui] [--severity LEVEL] [--cve ID] [--asset TERM] [--new] \
-         [--fixed] [--since DATE] [--include-info] [--verbose] [--json] [--backend pocketbase|sqlite]"
+        "Usage: ploit-malper findings [--tui] [--severity LEVEL] [--cve ID] [--asset TERM] [--lifecycle STATE] \
+         [--new] [--fixed] [--since DATE] [--include-info] [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
 
@@ -41,6 +41,7 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
     // explicit --severity info) opts in.
     let info_requested = severity_filter.as_deref() == Some("info");
     let include_info = parsed.has("include-info") || info_requested;
+    let lifecycle_filter = LifecycleFilter::parse_singleton(&parsed, true, true);
 
     let mut selected: Vec<&Finding> = Vec::new();
     for finding in &findings {
@@ -75,11 +76,10 @@ pub fn cmd_findings(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
             }
         }
         let state = obs_index.state(&finding.stable_id, &finding.status);
-        if parsed.has("new") && state != ChangeState::New {
-            continue;
-        }
-        if parsed.has("fixed") && state != ChangeState::Removed {
-            continue;
+        if let Some(filter) = lifecycle_filter {
+            if !filter.matches(state.into()) {
+                continue;
+            }
         }
         selected.push(finding);
     }

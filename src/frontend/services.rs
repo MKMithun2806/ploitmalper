@@ -2,13 +2,13 @@ use crate::config::ConfigManager;
 use crate::db::models::Service;
 use crate::error::Result;
 use crate::frontend::{
-    empty_result, fmt_ts, open_backend, print_json, Args, Cell, ChangeState, IdMaps, ObsIndex,
+    empty_result, fmt_ts, open_backend, print_json, Args, Cell, IdMaps, LifecycleFilter, ObsIndex,
     Table,
 };
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper services [--port N] [--product TERM] [--asset TERM] [--changed] \
+        "Usage: ploit-malper services [--port N] [--product TERM] [--asset TERM] [--lifecycle STATE] \
          [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
@@ -38,6 +38,8 @@ pub fn cmd_services(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
         }
         None => None,
     };
+
+    let lifecycle_filter = LifecycleFilter::parse_singleton(&parsed, false, false);
 
     let mut selected: Vec<&Service> = Vec::new();
     for service in &services {
@@ -72,8 +74,10 @@ pub fn cmd_services(args: &[String], config_mgr: &mut ConfigManager) -> Result<(
             }
         }
         let state = obs_index.state(&service.stable_id, &service.status);
-        if parsed.has("changed") && state != ChangeState::Changed {
-            continue;
+        if let Some(filter) = lifecycle_filter {
+            if !filter.matches(state.into()) {
+                continue;
+            }
         }
         selected.push(service);
     }

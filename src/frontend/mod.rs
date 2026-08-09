@@ -23,6 +23,7 @@ use crate::error::{AppError, Result};
 
 const BOOLEAN_FLAGS: &[&str] = &[
     "verbose", "json", "new", "changed", "fixed", "help", "dry-run", "yes", "tui", "include-info",
+    "all", "assets",
 ];
 const VALUE_FLAGS: &[&str] = &[
     "target",
@@ -39,6 +40,8 @@ const VALUE_FLAGS: &[&str] = &[
     "payload",
     "workspace",
     "job-timeout",
+    "status",
+    "lifecycle",
 ];
 
 /// Minimal, consistent flag parser shared by all frontend commands.
@@ -543,9 +546,24 @@ impl IdMaps {
 }
 
 // ---------------------------------------------------------------------------
-// Observation-derived change state
+// Observation-derived lifecycle state
 // ---------------------------------------------------------------------------
 
+/// First-class lifecycle of a record, derived from its observations and its
+/// stored status. `Active` and `Unchanged` are the same lifecycle (present and
+/// unchanged in the latest run); the `Unchanged` alias exists so callers and
+/// CLI flags can spell it either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    New,
+    Active,
+    Changed,
+    Removed,
+}
+
+/// Backward-compatible finite state for observation classification. Kept as
+/// a separate type so `ObsIndex::state` semantics stay intact; `Lifecycle`
+/// is the first-class projection used by the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeState {
     New,
@@ -570,6 +588,60 @@ impl ChangeState {
             ChangeState::Changed => yellow(text),
             ChangeState::Removed => red(text),
             ChangeState::Unchanged => dim(text),
+        }
+    }
+}
+
+/// Recognised lifecycle spellings accepted by CLI filters.
+pub const LIFECYCLE_NAMES: &[&str] = &["new", "active", "unchanged", "changed", "removed", "fixed"];
+
+impl Lifecycle {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Lifecycle::New => "new",
+            Lifecycle::Active => "active",
+            Lifecycle::Changed => "changed",
+            Lifecycle::Removed => "removed",
+        }
+    }
+
+    /// Combine the stored lifecycle status with the state recorded this run.
+    pub fn resolve(status: &str, run_state: Self) -> Self {
+        if status == crate::db::models::ASSET_REMOVED {
+            return Lifecycle::Removed;
+        }
+        run_state
+    }
+
+    /// True when `name` denotes this lifecycle. `active` and `unchanged` are
+    /// interchangeable; `fixed` is a synonym for `removed` in findings UI.
+    pub fn matches(&self, name: &str) -> bool {
+        match name {
+            "new" => matches!(self, Lifecycle::New),
+            "active" | "unchanged" => matches!(self, Lifecycle::Active),
+            "changed" => matches!(self, Lifecycle::Changed),
+            "removed" | "fixed" => matches!(self, Lifecycle::Removed),
+            _ => false,
+        }
+    }
+
+    pub fn paint(&self, text: &str) -> String {
+        match self {
+            Lifecycle::New => green(text),
+            Lifecycle::Changed => yellow(text),
+            Lifecycle::Removed => red(text),
+            Lifecycle::Active => dim(text),
+        }
+    }
+}
+
+impl From<ChangeState> for Lifecycle {
+    fn from(state: ChangeState) -> Self {
+        match state {
+            ChangeState::New => Lifecycle::New,
+            ChangeState::Changed => Lifecycle::Changed,
+            ChangeState::Removed => Lifecycle::Removed,
+            ChangeState::Unchanged => Lifecycle::Active,
         }
     }
 }
@@ -635,6 +707,12 @@ impl ObsIndex {
             Some(obs) => classify_kind(&obs.kind),
             None => ChangeState::Unchanged,
         }
+    }
+
+    /// First-class lifecycle for a record combining stored status and the
+    /// most recent run's observation.
+    pub fn lifecycle(&self, id: &str, status: &str) -> Lifecycle {
+        Lifecycle::resolve(status, self.state(id, status).into())
     }
 
     pub fn latest_run(&self) -> &str {
@@ -854,5 +932,102 @@ pub fn value_to_short(value: &Value) -> String {
         Value::Null => "-".to_string(),
         Value::String(s) => truncate(s, 80).to_string(),
         other => truncate(&other.to_string(), 120).to_string(),
+    }
+}
+
+/// A parsed lifecycle filter (`--lifecycle`/`--status`) from the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleFilter {
+    New,
+    Active,
+    Changed,
+    Removed,
+}
+
+impl LifecycleFilter {
+    /// Parse a CLI lifecycle term; legacy singletons (`--new`, `--fixed`) map
+    /// to the equivalent lifecycle so all commands share one query model.
+    pub fn parse_singleton(args: &Args, override_new: bool, override_fixed: bool) -> Option<Self> {
+        if let Some(raw) = args.get("lifecycle").or_else(|| args.get("status")) {
+            return Self::parse_term(raw);
+        }
+        if override_new && args.has("new") {
+            return Some(LifecycleFilter::New);
+        }
+        if args.has("assets") {
+            return None;
+        }
+        if override_fixed && args.has("fixed") {
+            return Some(LifecycleFilter::Removed);
+        }
+        if args.has("changed") {
+            return Some(LifecycleFilter::Changed);
+        }
+        None
+    }
+
+    /// Parse a lifecycle term to a filter, or `None` for unknown spellings.
+    pub fn parse_term(raw: &str) -> Option<Self> {
+        match raw.to_lowercase().as_str() {
+            "new" => Some(LifecycleFilter::New),
+            "active" | "unchanged" => Some(LifecycleFilter::Active),
+            "changed" => Some(LifecycleFilter::Changed),
+            "removed" | "fixed" => Some(LifecycleFilter::Removed),
+            _ => None,
+        }
+    }
+
+    pub fn matches(&self, lifecycle: Lifecycle) -> bool {
+        match self {
+            LifecycleFilter::New => matches!(lifecycle, Lifecycle::New),
+            LifecycleFilter::Active => matches!(lifecycle, Lifecycle::Active),
+            LifecycleFilter::Changed => matches!(lifecycle, Lifecycle::Changed),
+            LifecycleFilter::Removed => matches!(lifecycle, Lifecycle::Removed),
+        }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_terms_alias() {
+        assert_eq!(
+            LifecycleFilter::parse_term("active"),
+            Some(LifecycleFilter::Active)
+        );
+        assert_eq!(
+            LifecycleFilter::parse_term("unchanged"),
+            Some(LifecycleFilter::Active)
+        );
+        assert_eq!(
+            LifecycleFilter::parse_term("fixed"),
+            Some(LifecycleFilter::Removed)
+        );
+        assert_eq!(LifecycleFilter::parse_term("bogus"), None);
+    }
+
+    #[test]
+    fn lifecycle_matches() {
+        assert!(LifecycleFilter::New.matches(Lifecycle::New));
+        assert!(!LifecycleFilter::New.matches(Lifecycle::Active));
+        assert!(LifecycleFilter::Active.matches(Lifecycle::Active));
+        assert!(LifecycleFilter::Changed.matches(Lifecycle::Changed));
+        assert!(LifecycleFilter::Removed.matches(Lifecycle::Removed));
+    }
+
+    #[test]
+    fn singleton_flags_map() {
+        let new = Args::parse(&["--new".to_string()]).unwrap();
+        assert_eq!(
+            LifecycleFilter::parse_singleton(&new, true, false),
+            Some(LifecycleFilter::New)
+        );
+        let changed = Args::parse(&["--changed".to_string()]).unwrap();
+        assert_eq!(
+            LifecycleFilter::parse_singleton(&changed, true, false),
+            Some(LifecycleFilter::Changed)
+        );
     }
 }

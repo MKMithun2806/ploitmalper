@@ -2,13 +2,13 @@ use crate::config::ConfigManager;
 use crate::db::models::Asset;
 use crate::error::{AppError, Result};
 use crate::frontend::{
-    bold, fmt_ts, open_backend, parse_ts, print_json, ts_since, Args, Cell, ChangeState, IdMaps,
-    ObsIndex, Table,
+    bold, fmt_ts, open_backend, parse_ts, print_json, ts_since, Args, Cell, IdMaps,
+    LifecycleFilter, ObsIndex, Table,
 };
 
 pub fn usage() {
     println!(
-        "Usage: ploit-malper assets [--new] [--changed] [--since DATE] [--target TERM] \
+        "Usage: ploit-malper assets [--lifecycle STATE] [--new] [--changed] [--since DATE] [--target TERM] \
          [--verbose] [--json] [--backend pocketbase|sqlite]"
     );
 }
@@ -34,6 +34,8 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
         ),
         None => None,
     };
+
+    let lifecycle_filter = LifecycleFilter::parse_singleton(&parsed, true, false);
 
     let mut selected: Vec<&Asset> = Vec::new();
     for asset in &assets {
@@ -62,11 +64,10 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
             }
         }
         let state = obs_index.state(&asset.stable_id, &asset.status);
-        if parsed.has("new") && state != ChangeState::New {
-            continue;
-        }
-        if parsed.has("changed") && state != ChangeState::Changed {
-            continue;
+        if let Some(filter) = lifecycle_filter {
+            if !filter.matches(state.into()) {
+                continue;
+            }
         }
         selected.push(asset);
     }
@@ -132,11 +133,11 @@ pub fn cmd_assets(args: &[String], config_mgr: &mut ConfigManager) -> Result<()>
     Ok(())
 }
 
-fn state_style(state: ChangeState) -> &'static str {
+fn state_style(state: crate::frontend::ChangeState) -> &'static str {
     match state {
-        ChangeState::New => "32",
-        ChangeState::Changed => "33",
-        ChangeState::Removed => "31",
-        ChangeState::Unchanged => "2",
+        crate::frontend::ChangeState::New => "32",
+        crate::frontend::ChangeState::Changed => "33",
+        crate::frontend::ChangeState::Removed => "31",
+        crate::frontend::ChangeState::Unchanged => "2",
     }
 }
