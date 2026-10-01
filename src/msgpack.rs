@@ -326,7 +326,24 @@ fn decode_str(bytes: &[u8], index: usize, len: usize) -> Result<(MsgValue, usize
     Ok((MsgValue::String(value), end))
 }
 
+/// Reject a declared element count that cannot fit in the bytes still left.
+///
+/// Every element occupies at least one byte, so `len > remaining` is always a
+/// malformed header. This bound has to run *before* any reservation: without
+/// it a five-byte `array32` payload asking for 0x0fffffff elements makes
+/// `Vec::with_capacity` try to reserve ~8 GB and abort the process.
+fn check_len(bytes: &[u8], index: usize, len: usize, what: &str) -> Result<()> {
+    let remaining = bytes.len().saturating_sub(index);
+    if len > remaining {
+        return Err(AppError::Msgpack(format!(
+            "msgpack {what} length {len} exceeds the {remaining} byte(s) still available"
+        )));
+    }
+    Ok(())
+}
+
 fn decode_array(bytes: &[u8], mut index: usize, len: usize) -> Result<(MsgValue, usize)> {
+    check_len(bytes, index, len, "array")?;
     let mut values = Vec::with_capacity(len);
     for _ in 0..len {
         let (value, next) = decode_value(bytes, index)?;
@@ -337,6 +354,7 @@ fn decode_array(bytes: &[u8], mut index: usize, len: usize) -> Result<(MsgValue,
 }
 
 fn decode_map(bytes: &[u8], mut index: usize, len: usize) -> Result<(MsgValue, usize)> {
+    check_len(bytes, index, len, "map")?;
     let mut map = BTreeMap::new();
     for _ in 0..len {
         let (key_value, next_key) = decode_value(bytes, index)?;
@@ -675,6 +693,25 @@ mod tests {
         let result = decode(&bytes);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("trailing bytes"));
+    }
+
+    #[test]
+    fn decode_rejects_impossible_array_length() {
+        // array32 declaring 0x0fffffff elements inside a five-byte payload.
+        let result = decode(&[0xdd, 0x0f, 0xff, 0xff, 0xff]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("array length"));
+        // array16 with a smaller but still impossible count.
+        assert!(decode(&[0xdc, 0xff, 0xff]).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_impossible_map_length() {
+        // map32 declaring 0x0fffffff entries inside a five-byte payload.
+        let result = decode(&[0xdf, 0x0f, 0xff, 0xff, 0xff]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("map length"));
+        assert!(decode(&[0xde, 0xff, 0xff]).is_err());
     }
 
     #[test]
