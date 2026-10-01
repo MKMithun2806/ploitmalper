@@ -71,8 +71,8 @@ pub fn run() -> Result<()> {
             print_banner();
         }
         other => {
-            eprintln!("[!] Unknown command: {}", other);
             print_banner();
+            return Err(AppError::Message(format!("Unknown command: {}", other)));
         }
     }
 
@@ -118,19 +118,47 @@ fn cmd_setup(config_mgr: &mut ConfigManager) -> Result<()> {
 }
 
 fn cmd_process(args: &[String], config_mgr: &mut ConfigManager, config_loaded: bool) -> Result<()> {
-    let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
-    let input_file = match args.iter().find(|a| !a.starts_with('-')) {
+    let usage = "ploit-malper process <file.json> [--verbose]";
+    let mut verbose = false;
+    let mut input_file: Option<&str> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            "-h" | "--help" => {
+                println!("Usage: {usage}");
+                return Ok(());
+            }
+            flag if flag.starts_with('-') => {
+                return Err(AppError::Message(format!(
+                    "unknown process option: {flag} (usage: {usage})"
+                )));
+            }
+            value => {
+                if input_file.is_some() {
+                    return Err(AppError::Message(format!(
+                        "unexpected extra argument: {value}"
+                    )));
+                }
+                input_file = Some(value);
+            }
+        }
+    }
+
+    let input_file = match input_file {
         Some(path) => path,
         None => {
-            eprintln!("[!] No input file specified. Use: ploit-malper process <scan.json>");
-            return Ok(());
+            return Err(AppError::Message(format!(
+                "No input file specified. Use: {usage}"
+            )));
         }
     };
 
     let input_path = PathBuf::from(input_file);
     if !input_path.exists() {
-        eprintln!("[!] File not found: {}", input_path.display());
-        return Ok(());
+        return Err(AppError::Message(format!(
+            "File not found: {}",
+            input_path.display()
+        )));
     }
 
     let process_opts = crate::process::ProcessOptions {
