@@ -252,6 +252,17 @@ pub fn ingest_folder(
         .map(|f| (f.stable_id.clone(), f))
         .collect();
 
+    // Only records belonging to this run's target family may take part in the
+    // `removed` half of the diff.
+    let removal = removal_scope(
+        &mut storage,
+        &primary,
+        &folder_hint,
+        &prev_assets,
+        &prev_services,
+        &prev_findings,
+    )?;
+
     // ------------------------------------------------------------------
     // Build the new world state in dependency order.
     // ------------------------------------------------------------------
@@ -281,18 +292,33 @@ pub fn ingest_folder(
     // ------------------------------------------------------------------
     let mut observations = Vec::new();
 
-    let mut asset_observations =
-        commit_assets(&mut storage, &run_id, &mut ctx.assets, &prev_assets)?;
+    let mut asset_observations = commit_assets(
+        &mut storage,
+        &run_id,
+        &mut ctx.assets,
+        &prev_assets,
+        &removal.assets,
+    )?;
     observations.append(&mut asset_observations);
     summary.assets = ctx.assets.len();
 
-    let mut service_observations =
-        commit_services(&mut storage, &run_id, &mut ctx.services, &prev_services)?;
+    let mut service_observations = commit_services(
+        &mut storage,
+        &run_id,
+        &mut ctx.services,
+        &prev_services,
+        &removal.services,
+    )?;
     observations.append(&mut service_observations);
     summary.services = ctx.services.len();
 
-    let mut finding_observations =
-        commit_findings(&mut storage, &run_id, &mut ctx.findings, &prev_findings)?;
+    let mut finding_observations = commit_findings(
+        &mut storage,
+        &run_id,
+        &mut ctx.findings,
+        &prev_findings,
+        &removal.findings,
+    )?;
     observations.append(&mut finding_observations);
     summary.findings = ctx.findings.len();
 
@@ -1237,11 +1263,100 @@ struct ObsSpec {
     detail: String,
 }
 
+/// The records a run is allowed to mark `removed`.
+///
+/// An ingest only sees its own folder, so "absent from this folder" is a
+/// meaningful signal solely for records that belong to the same target
+/// family. Without this scoping, importing a second host's results marked
+/// every unrelated asset, service and finding as removed.
+#[derive(Debug, Default)]
+struct RemovalScope {
+    assets: HashSet<String>,
+    services: HashSet<String>,
+    findings: HashSet<String>,
+}
+
+/// Restrict the `removed` diff to records owned by this run's target.
+///
+/// A record is in scope when a previous run of a compatible target observed
+/// it — that is what ties a multi-host graph back to the run target even for
+/// hosts that do not normalise to it — or, as a fallback for rows written
+/// without observations, when its own name normalises to the same target.
+/// Services and findings additionally inherit scope from their asset.
+///
+/// When the run target is unknown, or no compatible run has ever been
+/// imported, nothing is eligible: an unscoped ingest must never wipe
+/// unrelated intelligence.
+fn removal_scope(
+    storage: &mut Box<dyn Storage>,
+    primary: &str,
+    folder_hint: &str,
+    prev_assets: &HashMap<String, Asset>,
+    prev_services: &HashMap<String, Service>,
+    prev_findings: &HashMap<String, Finding>,
+) -> Result<RemovalScope> {
+    let primary = primary.trim();
+    if primary.is_empty() {
+        return Ok(RemovalScope::default());
+    }
+
+    let runs = storage.list_scan_runs()?;
+    let scoped_runs: HashSet<&str> = runs
+        .iter()
+        .filter(|run| {
+            !run.target.trim().is_empty() && target_compatible(primary, &run.target, folder_hint)
+        })
+        .map(|run| run.stable_id.as_str())
+        .collect();
+    if scoped_runs.is_empty() {
+        return Ok(RemovalScope::default());
+    }
+
+    let observations = storage.list_all_observations()?;
+    let observed: HashSet<(&str, &str)> = observations
+        .iter()
+        .filter(|obs| scoped_runs.contains(obs.run_id.as_str()))
+        .map(|obs| (obs.subject_type.as_str(), obs.subject_id.as_str()))
+        .collect();
+
+    let assets: HashSet<String> = prev_assets
+        .iter()
+        .filter(|(id, asset)| {
+            observed.contains(&("asset", id.as_str()))
+                || target_compatible(primary, &asset.name, folder_hint)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let services: HashSet<String> = prev_services
+        .iter()
+        .filter(|(id, service)| {
+            observed.contains(&("service", id.as_str())) || assets.contains(&service.asset_id)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    let findings: HashSet<String> = prev_findings
+        .iter()
+        .filter(|(id, finding)| {
+            observed.contains(&("finding", id.as_str())) || assets.contains(&finding.asset_id)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+
+    Ok(RemovalScope {
+        assets,
+        services,
+        findings,
+    })
+}
+
 fn commit_assets(
     storage: &mut Box<dyn Storage>,
     run_id: &str,
     new: &mut HashMap<String, Asset>,
     prev: &HashMap<String, Asset>,
+    removable: &HashSet<String>,
 ) -> Result<Vec<Observation>> {
     let mut observations = Vec::new();
     for (id, asset) in new.iter_mut() {
@@ -1277,7 +1392,7 @@ fn commit_assets(
         }
     }
     for (id, old) in prev {
-        if !new.contains_key(id) {
+        if !new.contains_key(id) && removable.contains(id) {
             let mut removed = old.clone();
             removed.status = ASSET_REMOVED.to_string();
             storage.upsert_asset(&removed)?;
@@ -1300,6 +1415,7 @@ fn commit_services(
     run_id: &str,
     new: &mut HashMap<String, Service>,
     prev: &HashMap<String, Service>,
+    removable: &HashSet<String>,
 ) -> Result<Vec<Observation>> {
     let mut observations = Vec::new();
     for (id, service) in new.iter_mut() {
@@ -1335,7 +1451,7 @@ fn commit_services(
         }
     }
     for (id, old) in prev {
-        if !new.contains_key(id) {
+        if !new.contains_key(id) && removable.contains(id) {
             let mut removed = old.clone();
             removed.status = ASSET_REMOVED.to_string();
             storage.upsert_service(&removed)?;
@@ -1358,6 +1474,7 @@ fn commit_findings(
     run_id: &str,
     new: &mut HashMap<String, Finding>,
     prev: &HashMap<String, Finding>,
+    removable: &HashSet<String>,
 ) -> Result<Vec<Observation>> {
     let mut observations = Vec::new();
     for (id, finding) in new.iter_mut() {
@@ -1393,7 +1510,7 @@ fn commit_findings(
         }
     }
     for (id, old) in prev {
-        if !new.contains_key(id) {
+        if !new.contains_key(id) && removable.contains(id) {
             let mut removed = old.clone();
             removed.status = ASSET_REMOVED.to_string();
             storage.upsert_finding(&removed)?;
@@ -1851,5 +1968,132 @@ mod tests {
         let _ = PathBuf::from(&db_path);
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Write a minimal VulnMalper export covering `source_target` and every
+    /// host in `hosts`.
+    fn write_vulnmalper_scan(dir: &Path, source_target: &str, hosts: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let entries: Vec<Value> = hosts
+            .iter()
+            .map(|host| {
+                json!({
+                    "host": host,
+                    "url": format!("http://{}/", host),
+                    "port": 80,
+                    "scheme": "http",
+                    "findings": [{
+                        "tool": "nikto",
+                        "severity": "low",
+                        "title": "Missing security header",
+                        "target": format!("http://{}/", host),
+                        "detail": "Suggested security header missing.",
+                        "reference": ""
+                    }]
+                })
+            })
+            .collect();
+        let document = json!({
+            "vulnmalper": { "version": "8.0.0", "source_target": source_target },
+            "hosts": entries,
+        });
+        let path = dir.join(format!("vulnmalper_{}.json", source_target));
+        std::fs::write(path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+    }
+
+    fn sqlite_test_config(path: &Path) -> DatabaseConfig {
+        DatabaseConfig {
+            backend: "sqlite".to_string(),
+            sqlite_path: path.to_string_lossy().to_string(),
+            configured: true,
+            ..Default::default()
+        }
+    }
+
+    fn ingest_test_folder(folder: &Path, db_cfg: &DatabaseConfig) {
+        ingest_folder(folder, db_cfg, &IngestOptions::default()).unwrap();
+    }
+
+    fn asset_statuses(storage: &mut Box<dyn crate::db::Storage>) -> HashMap<String, String> {
+        storage
+            .list_assets()
+            .unwrap()
+            .into_iter()
+            .map(|asset| (asset.name, asset.status))
+            .collect()
+    }
+
+    #[test]
+    fn ingesting_a_second_target_leaves_the_first_target_active() {
+        let root = temp_dir("ingest_removal_other_target");
+        let first = root.join("scan_first");
+        let second = root.join("scan_second");
+        write_vulnmalper_scan(&first, "10.0.0.1", &["10.0.0.1"]);
+        write_vulnmalper_scan(&second, "10.0.0.2", &["10.0.0.2"]);
+
+        let db_path = root.join("scope.db");
+        let db_cfg = sqlite_test_config(&db_path);
+        ingest_test_folder(&first, &db_cfg);
+        ingest_test_folder(&second, &db_cfg);
+
+        let mut storage = crate::db::open_storage_with(&db_cfg, "sqlite", None, None).unwrap();
+        let assets = asset_statuses(&mut storage);
+        assert_eq!(assets.len(), 2, "expected one asset per target: {assets:?}");
+        assert_eq!(assets.get("10.0.0.1").map(String::as_str), Some("active"));
+        assert_eq!(assets.get("10.0.0.2").map(String::as_str), Some("active"));
+
+        let findings = storage.list_all_findings().unwrap();
+        assert_eq!(findings.len(), 2, "expected one finding per target");
+        for finding in &findings {
+            assert_eq!(
+                finding.status, "active",
+                "finding '{}' of the first target was wiped by the second ingest",
+                finding.title
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hosts_missing_from_a_rescan_of_the_same_target_are_removed() {
+        let root = temp_dir("ingest_removal_same_target");
+        let before = root.join("scan_before");
+        let after = root.join("scan_after");
+        write_vulnmalper_scan(&before, "10.0.0.1", &["10.0.0.1", "10.0.0.2"]);
+        write_vulnmalper_scan(&after, "10.0.0.1", &["10.0.0.1"]);
+
+        let db_path = root.join("scope.db");
+        let db_cfg = sqlite_test_config(&db_path);
+        ingest_test_folder(&before, &db_cfg);
+        ingest_test_folder(&after, &db_cfg);
+
+        let mut storage = crate::db::open_storage_with(&db_cfg, "sqlite", None, None).unwrap();
+        let assets = asset_statuses(&mut storage);
+        assert_eq!(assets.len(), 2, "expected both hosts as assets: {assets:?}");
+        assert_eq!(assets.get("10.0.0.1").map(String::as_str), Some("active"));
+        assert_eq!(
+            assets.get("10.0.0.2").map(String::as_str),
+            Some("removed"),
+            "a host that vanished from its own target's rescan must be removed"
+        );
+
+        let findings = storage.list_all_findings().unwrap();
+        assert_eq!(findings.len(), 2);
+        for finding in &findings {
+            let host = finding
+                .target_url
+                .as_deref()
+                .map(|url| url.trim_start_matches("http://").trim_end_matches('/'))
+                .unwrap_or_default();
+            let expected = if host == "10.0.0.2" {
+                "removed"
+            } else {
+                "active"
+            };
+            assert_eq!(finding.status, expected, "finding on {host}");
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
